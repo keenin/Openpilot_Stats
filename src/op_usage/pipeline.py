@@ -13,7 +13,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from op_usage.aggregate import aggregate_commits
-from op_usage.cache import Cache, DriveRow
+from op_usage.cache import SCHEMA_VERSION, Cache, DriveRow
 from op_usage.comma_api import CommaClient, RouteMeta, iter_time_chunks, normalize_routes
 from op_usage.config import Settings
 from op_usage.qlog import extract_engaged_time_from_qlogs, load_event_module
@@ -80,7 +80,7 @@ def run_demo(settings: Settings, fixture_path: Path) -> RunStats:
     return RunStats(html_path=str(html_path), routes_listed=0)
 
 
-def run_pipeline(settings: Settings, *, backfill: bool) -> RunStats:
+def run_pipeline(settings: Settings, *, backfill: bool, reparse_engaged: bool = False) -> RunStats:
     if not settings.has_auth:
         raise SystemExit(
             "COMMA_JWT and DONGLE_ID are required. Put them in "
@@ -103,6 +103,16 @@ def run_pipeline(settings: Settings, *, backfill: bool) -> RunStats:
 
     with Cache(settings.cache_path) as cache:
         cache.set_meta("dongle_id", settings.dongle_id or "")
+        if cache.schema_upgraded_from:
+            log.warning(
+                "cache schema_version %s → %s; cached engaged_time_s=0 rows will not "
+                "reparse unless you pass --reparse-engaged (or SQL-clear qlog_parsed)",
+                cache.schema_upgraded_from,
+                SCHEMA_VERSION,
+            )
+        if reparse_engaged:
+            n = cache.clear_engaged_parses()
+            log.info("cleared %d cached qlog parses; will re-download and reparse", n)
         start_ms = _window_start(cache, settings, backfill=backfill, now_ms=now_ms)
         log.info(
             "listing routes %s → now (chunk=%dd, backfill=%s)",

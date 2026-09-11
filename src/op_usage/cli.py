@@ -25,6 +25,16 @@ def main(argv: list[str] | None = None) -> int:
     shared.add_argument("--cache", type=Path, default=None, help="sqlite override")
     sub = parser.add_subparsers(dest="cmd", required=True)
 
+    reparse = argparse.ArgumentParser(add_help=False)
+    reparse.add_argument(
+        "--reparse-engaged",
+        action="store_true",
+        help=(
+            "Clear cached qlog parses (including engaged_time_s=0) and re-read qlogs. "
+            "Needed once after the Event-schema fix so bad zeros are not skipped."
+        ),
+    )
+
     demo = sub.add_parser("demo", parents=[shared], help="Generate site from fixture JSON (no JWT).")
     demo.add_argument(
         "--fixture",
@@ -33,8 +43,16 @@ def main(argv: list[str] | None = None) -> int:
         help="JSON list of drives",
     )
 
-    sub.add_parser("backfill", parents=[shared], help="Full historical fetch once, then write HTML.")
-    sub.add_parser("nightly", parents=[shared], help="Incremental fetch (watermark + last-day recheck) + HTML.")
+    sub.add_parser(
+        "backfill",
+        parents=[shared, reparse],
+        help="Full historical fetch once, then write HTML.",
+    )
+    sub.add_parser(
+        "nightly",
+        parents=[shared, reparse],
+        help="Incremental fetch (watermark + last-day recheck) + HTML.",
+    )
     sub.add_parser("generate", parents=[shared], help="Rebuild index.html from the local cache only.")
     dep = sub.add_parser("deploy", parents=[shared], help="wrangler pages deploy ./site")
     dep.add_argument("--dry-run", action="store_true")
@@ -57,11 +75,11 @@ def main(argv: list[str] | None = None) -> int:
         print(f"wrote {path}")
         return 0
     if args.cmd == "backfill":
-        stats = run_pipeline(settings, backfill=True)
+        stats = run_pipeline(settings, backfill=True, reparse_engaged=args.reparse_engaged)
         print(f"backfill listed={stats.routes_listed} parsed={stats.qlogs_parsed} → {stats.html_path}")
         return 0
     if args.cmd == "nightly":
-        stats = run_pipeline(settings, backfill=False)
+        stats = run_pipeline(settings, backfill=False, reparse_engaged=args.reparse_engaged)
         print(
             f"nightly listed={stats.routes_listed} parsed={stats.qlogs_parsed} "
             f"cached_skip={stats.qlogs_skipped_cached} → {stats.html_path}"

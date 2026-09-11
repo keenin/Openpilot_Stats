@@ -8,15 +8,16 @@ Access path (live):
 
 Field used:
   Prefer  selfdriveState.enabled   (openpilot ~0.9.7+, Event union @130)
-  Fallback controlsState.enabled   (older logs, ControlsState @19)
+  Fallback controlsState.enabled   (older logs; cereal field @19, now under
+                                    ControlsState.deprecated.enabled)
 
 Engage time is the integral of enabled over logMonoTime (nanoseconds), not a
 sample count. Gaps larger than MAX_GAP_S are skipped (segment holes / dropout).
 
 If an openpilot checkout is on OPENPILOT_PATH, cereal.log.Event is used.
-Otherwise the bundled stub schema (schemas/engaged.capnp) is used — enough for
-fixtures and, by field-number alignment, modern selfdriveState messages.
-TODO: confirm stub ControlsState.enabled against one real pre-0.9.7 qlog.
+Otherwise the bundled stub schema (schemas/engaged.capnp) is used. The stub
+must keep Event.valid @67 *outside* the union — cereal does that, and putting
+@67 in the union makes which() report selfdriveState as u129.
 """
 
 from __future__ import annotations
@@ -129,7 +130,10 @@ def load_event_module(openpilot_path: Path | None = None, cereal_path: Path | No
         log.info("qlog parser: using cereal.log.Event")
         return cereal_event
     stub = _load_stub_schema()
-    log.info("qlog parser: using bundled stub schema (selfdriveState @130 / controlsState @7)")
+    log.info(
+        "qlog parser: using bundled stub schema "
+        "(Event.valid @67, selfdriveState @130, controlsState.enabled @19)"
+    )
     return stub
 
 
@@ -139,6 +143,7 @@ def _try_cereal(openpilot_path: Path | None, cereal_path: Path | None) -> Any | 
         extra.append(str(openpilot_path))
         extra.append(str(openpilot_path.parent))
     if cereal_path:
+        extra.append(str(cereal_path))
         extra.append(str(cereal_path.parent))
     for path in extra:
         if path not in sys.path:
@@ -193,17 +198,33 @@ def _event_to_sample(event: Any) -> EnabledSample | None:
         return None
     if which == "selfdriveState":
         try:
-            enabled = bool(event.selfdriveState.enabled)
+            enabled = _read_enabled(event.selfdriveState)
         except Exception:
+            return None
+        if enabled is None:
             return None
         return EnabledSample(mono, enabled, SELFDRIVE_SOURCE)
     if which == "controlsState":
         try:
-            enabled = bool(event.controlsState.enabled)
+            enabled = _read_enabled(event.controlsState)
         except Exception:
+            return None
+        if enabled is None:
             return None
         return EnabledSample(mono, enabled, CONTROLS_SOURCE)
     return None
+
+
+def _read_enabled(obj: Any) -> bool | None:
+    """cereal moved ControlsState.enabled into deprecated :group (same ordinal @19)."""
+    try:
+        return bool(obj.enabled)
+    except Exception:
+        pass
+    try:
+        return bool(obj.deprecated.enabled)
+    except Exception:
+        return None
 
 
 def encode_synthetic_qlog(

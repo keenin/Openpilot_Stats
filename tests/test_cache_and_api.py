@@ -33,6 +33,23 @@ def test_watermark_only_moves_forward(tmp_path) -> None:
         assert cache.watermark_ms() == 80
 
 
+def test_clear_engaged_parses_allows_reparse(tmp_path) -> None:
+    with Cache(tmp_path / "c.sqlite") as cache:
+        cache.upsert_route_meta(_row(qlog_parsed=False, engaged_time_s=None))
+        cache.save_engaged("d|r", 0.0, "controlsState.enabled")
+        existing = cache.get_drive("d|r")
+        assert existing and existing.qlog_parsed
+        assert existing.engaged_time_s == 0.0
+        assert cache.needs_qlog_parse(_row(maxqlog=1), recheck_after_ms=10_000) is False
+        n = cache.clear_engaged_parses()
+        assert n == 1
+        cleared = cache.get_drive("d|r")
+        assert cleared and not cleared.qlog_parsed
+        assert cleared.engaged_time_s is None
+        assert cleared.engaged_source is None
+        assert cache.needs_qlog_parse(_row(maxqlog=1), recheck_after_ms=10_000) is True
+
+
 def test_parsed_qlog_not_redone_outside_recheck(tmp_path) -> None:
     with Cache(tmp_path / "c.sqlite") as cache:
         cache.upsert_route_meta(_row(qlog_parsed=False, engaged_time_s=None))

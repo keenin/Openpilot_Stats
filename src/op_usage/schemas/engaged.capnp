@@ -1,7 +1,21 @@
-# Auto-aligned with cereal Event union ordinals 1..130 so the capnp compiler
-# accepts the schema (unions cannot skip ordinals) and the discriminant values
-# match cereal: controlsState @7, selfdriveState @130.
-# Unused members are AnyPointer placeholders. Do not treat this as cereal.
+# Minimal cereal Event overlay for qlog engaged-time parsing.
+#
+# Matches commaai/openpilot cereal/log.capnp (master, 2026-09):
+#   Event.logMonoTime @0
+#   Event.valid @67          # NOT a union member — putting it in the union
+#                            # shifts the discriminant so selfdriveState @130
+#                            # is reported as u129 and never sampled.
+#   Event.union:
+#     controlsState @7
+#     selfdriveState @130
+#     (placeholders through @160; cereal currently tops out at @152)
+#   SelfdriveState.enabled @1
+#   ControlsState.enabled @19
+#     (cereal nested this under deprecated :group; same ordinal / wire bit)
+#
+# Unused union members are AnyPointer placeholders so the capnp compiler
+# accepts consecutive union ordinals (with the required @67 hole).
+# Do not treat this file as cereal.
 
 @0xbfa5e2c1d4a80917;
 
@@ -36,6 +50,7 @@ struct ControlsState {
 
 struct Event {
   logMonoTime @0 :UInt64;
+  valid @67 :Bool = true;
   union {
     u1 @1 :AnyPointer;
     u2 @2 :AnyPointer;
@@ -103,7 +118,6 @@ struct Event {
     u64 @64 :AnyPointer;
     u65 @65 :AnyPointer;
     u66 @66 :AnyPointer;
-    u67 @67 :AnyPointer;
     u68 @68 :AnyPointer;
     u69 @69 :AnyPointer;
     u70 @70 :AnyPointer;
@@ -167,6 +181,35 @@ struct Event {
     u128 @128 :AnyPointer;
     u129 @129 :AnyPointer;
     selfdriveState @130 :SelfdriveState;
+    u131 @131 :AnyPointer;
+    u132 @132 :AnyPointer;
+    u133 @133 :AnyPointer;
+    u134 @134 :AnyPointer;
+    u135 @135 :AnyPointer;
+    u136 @136 :AnyPointer;
+    u137 @137 :AnyPointer;
+    u138 @138 :AnyPointer;
+    u139 @139 :AnyPointer;
+    u140 @140 :AnyPointer;
+    u141 @141 :AnyPointer;
+    u142 @142 :AnyPointer;
+    u143 @143 :AnyPointer;
+    u144 @144 :AnyPointer;
+    u145 @145 :AnyPointer;
+    u146 @146 :AnyPointer;
+    u147 @147 :AnyPointer;
+    u148 @148 :AnyPointer;
+    u149 @149 :AnyPointer;
+    u150 @150 :AnyPointer;
+    u151 @151 :AnyPointer;
+    u152 @152 :AnyPointer;
+    u153 @153 :AnyPointer;
+    u154 @154 :AnyPointer;
+    u155 @155 :AnyPointer;
+    u156 @156 :AnyPointer;
+    u157 @157 :AnyPointer;
+    u158 @158 :AnyPointer;
+    u159 @159 :AnyPointer;
+    u160 @160 :AnyPointer;
   }
 }
-
