@@ -187,6 +187,8 @@ def _ts_ms(item: dict, ms_key: str, iso_key: str) -> int:
 
 
 def _meta_to_row(meta: RouteMeta) -> DriveRow:
+    # Wall-clock route duration, same window connect uses (segment start/end
+    # times, stored there as milliseconds). Engage % = engaged / this.
     duration = max(0.0, (meta.end_time_utc_ms - meta.start_time_utc_ms) / 1000.0)
     return DriveRow(
         route_name=meta.route_name,

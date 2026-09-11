@@ -55,6 +55,29 @@ SET qlog_parsed = 0, engaged_time_s = NULL, engaged_source = NULL;
 
 Then run `backfill` or `nightly` as usual (without the flag). Do not delete the whole sqlite file unless you also want to redo route listing / the watermark.
 
+### Refresh `length_miles` (required once after the distance-field fix)
+
+`generate` only reads sqlite. After a successful engaged-time reparse the table can still be empty if every cached `length_miles` is 0 / < 1 — the include rule is length ≥ 1 mile **and** engaged > 0.
+
+Live `routes_segments` objects use **`distance`** (miles). Older OpenAPI docs and some payloads still use **`length`** (also miles). The pipeline used to read only `length`, so a current API response stored 0 miles for every route. Cached engaged times are fine; do **not** pass `--reparse-engaged` and do **not** delete the sqlite file.
+
+Re-list route metadata so `upsert_route_meta` overwrites `length_miles` (and start/end times) without touching qlog parses:
+
+```bash
+python3 -m op_usage backfill -v
+python3 -m op_usage generate
+```
+
+`nightly` only re-lists from the watermark − 24h window, so it will not fix historical zeros. There is no SQL rewrite for this: the miles are not stored under another column. After the metadata backfill you can check:
+
+```sql
+SELECT
+  COUNT(*) AS total,
+  SUM(CASE WHEN engaged_time_s > 0 THEN 1 ELSE 0 END) AS engaged_gt0,
+  SUM(CASE WHEN length_miles >= 1 AND engaged_time_s > 0 THEN 1 ELSE 0 END) AS qualifying
+FROM drives;
+```
+
 ### Comma API (verified from public docs)
 
 Base URL: `https://api.commadotai.com`  
@@ -63,7 +86,7 @@ Auth: `Authorization: JWT <token>` from [jwt.comma.ai](https://jwt.comma.ai) —
 | Call | Role |
 |------|------|
 | `GET /v1/me` | Confirm the JWT |
-| `GET /v1/devices/{dongleId}/routes_segments?start={ms}&end={ms}` | Route list + `git_*`, `length` (miles), segment times |
+| `GET /v1/devices/{dongleId}/routes_segments?start={ms}&end={ms}` | Route list + `git_*`, `distance` (miles; OpenAPI name `length`), segment times |
 | `GET /v1/route/{routeName}/files` | Signed `qlogs[]` URLs. **Rate limit 5/min** |
 | Signed blob GET | Download `qlog.bz2` / `qlog.zst` |
 
@@ -124,6 +147,8 @@ python3 -m op_usage generate        # rebuild HTML from cache, no API
 
 If a previous run cached `engaged_time_s=0` for every route, add `--reparse-engaged` to `backfill` (see above).
 
+If engaged times look good but `generate` still writes an empty table, `length_miles` is stale — run `backfill` **without** `--reparse-engaged` (see “Refresh length_miles”).
+
 ### 5. Cloudflare Pages
 
 1. Create a Pages project named `op-usage` (or set `CF_PAGES_PROJECT`).
@@ -175,7 +200,7 @@ Nightly fetch window: `watermark - 24h` → now. Recheck last day if `maxqlog` i
 | Command | What it does |
 |---------|----------------|
 | `python -m op_usage demo` | Fixture drives → HTML, no JWT |
-| `python -m op_usage backfill` | Full history, parse uncached qlogs, write HTML |
+| `python -m op_usage backfill` | Full history, parse uncached qlogs, write HTML. Also refreshes `length_miles` from the API without re-reading qlogs. |
 | `python -m op_usage backfill --reparse-engaged` | Same, but clear cached engaged times first (re-download qlogs) |
 | `python -m op_usage nightly` | Incremental + 24h recheck, write HTML |
 | `python -m op_usage nightly --reparse-engaged` | Incremental listing, but reparse every listed route’s qlogs |
