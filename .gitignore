@@ -1,0 +1,30 @@
+# Secrets — never commit JWT / Cloudflare tokens
+.env
+.env.local
+credentials.env
+**/*.pem
+**/*.key
+
+# Local cache and generated site
+data/
+*.sqlite
+*.sqlite-journal
+*.sqlite-wal
+site/
+.cache/
+
+# Python
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+dist/
+build/
+
+# Wrangler / Node
+.wrangler/
+node_modules/
+.DS_Store

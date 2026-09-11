@@ -1,0 +1,18 @@
+# Cloudflare Pages project for the generated static site.
+# Deploy: ./scripts/deploy.sh
+#   (wraps: npx wrangler pages deploy ./site --project-name=op-usage)
+#
+# Custom domain later — use the Pages project URL until then.
+# This file does not enable any Worker JS; public artifact is static HTML only.
+
+name = "op-usage"
+compatibility_date = "2026-09-11"
+pages_build_output_dir = "site"
+
+# Alternative: Workers static assets (no Pages project). If you switch, comment
+# pages_build_output_dir above and uncomment:
+#
+# [assets]
+# directory = "./site"
+#
+# then: npx wrangler deploy
