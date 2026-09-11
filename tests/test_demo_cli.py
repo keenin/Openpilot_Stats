@@ -21,6 +21,14 @@ def test_demo_cli_writes_index(tmp_path) -> None:
     assert "<th>Engage %</th>" in html
 
 
+def test_reparse_engaged_flag_is_documented(capsys) -> None:
+    try:
+        main(["backfill", "--help"])
+    except SystemExit as exc:
+        assert exc.code == 0
+    assert "--reparse-engaged" in capsys.readouterr().out
+
+
 def test_deploy_dry_run(tmp_path, capsys) -> None:
     site = tmp_path / "site"
     site.mkdir()

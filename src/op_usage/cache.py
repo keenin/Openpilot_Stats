@@ -21,7 +21,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable, Iterator
 
-SCHEMA_VERSION = "1"
+SCHEMA_VERSION = "2"  # Event.valid @67 outside union; does not auto-clear engaged rows
 
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS meta (
@@ -77,8 +77,10 @@ class Cache:
         self._conn.row_factory = sqlite3.Row
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.executescript(SCHEMA_SQL)
+        previous = self.get_meta("schema_version")
         self.set_meta("schema_version", SCHEMA_VERSION)
         self._conn.commit()
+        self.schema_upgraded_from = previous if previous and previous != SCHEMA_VERSION else None
 
     def close(self) -> None:
         self._conn.close()
@@ -193,6 +195,24 @@ class Cache:
             """,
             (engaged_time_s, engaged_source, _now(), route_name),
         )
+
+    def clear_engaged_parses(self) -> int:
+        """Drop cached qlog results so the next fetch re-reads every route.
+
+        Use after a parser fix: qlog_parsed=1 with engaged_time_s=0 is treated as
+        a successful parse and is otherwise skipped forever.
+        """
+        cur = self._conn.execute(
+            """
+            UPDATE drives SET
+              qlog_parsed = 0,
+              engaged_time_s = NULL,
+              engaged_source = NULL,
+              updated_at = ?
+            """,
+            (_now(),),
+        )
+        return int(cur.rowcount or 0)
 
     def needs_qlog_parse(self, drive: DriveRow, recheck_after_ms: int) -> bool:
         """Old parsed routes are never re-read. Recheck window may retry if maxqlog grew."""

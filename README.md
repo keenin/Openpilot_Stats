@@ -30,11 +30,30 @@ Click the drive **count** to expand that commit (date, miles, engage %). The mai
 Computed from each drive’s **qlog** (decimated cereal events):
 
 1. Prefer **`selfdriveState.enabled`** (Event union field `@130`, current openpilot).
-2. If a qlog has no `selfdriveState` messages, fall back to **`controlsState.enabled`** (`@19` on ControlsState).
+2. If a qlog has no `selfdriveState` messages, fall back to **`controlsState.enabled`** (`@19` on ControlsState; cereal now exposes this as `controlsState.deprecated.enabled` — same wire field).
+
+The bundled Cap’n Proto stub must keep **`Event.valid @67` outside the union**, matching cereal. A previous stub put `@67` in the union, so `which()` reported `selfdriveState` as `u129` and every route looked like `engaged=0` from `controlsState.enabled` (modern controlsd no longer sets that flag).
 
 Integration uses `logMonoTime` deltas, not sample counts. Gaps > 5s are skipped so a missing segment is not counted as engaged.
 
 Per-route engaged time is **cached**. Old logs are not re-parsed. Nightly re-checks the last 24h in case uploads are still in flight (`maxqlog` grew).
+
+### Reparse cached zeros (required once after the schema fix)
+
+Routes already stored with `qlog_parsed=1` and `engaged_time_s=0` are skipped forever. After upgrading, **invalidate and re-read**:
+
+```bash
+python3 -m op_usage backfill -v --reparse-engaged
+```
+
+`--reparse-engaged` also works on `nightly`. Equivalent SQL on `~/.cache/op-usage/op-usage.sqlite`:
+
+```sql
+UPDATE drives
+SET qlog_parsed = 0, engaged_time_s = NULL, engaged_source = NULL;
+```
+
+Then run `backfill` or `nightly` as usual (without the flag). Do not delete the whole sqlite file unless you also want to redo route listing / the watermark.
 
 ### Comma API (verified from public docs)
 
@@ -56,7 +75,6 @@ Cabana/connect use the same files API; this tool only pulls qlogs, never cameras
 
 - Token lifetime: if nightly gets **401**, mint a new JWT at jwt.comma.ai and update the credentials file. No refresh flow in v1.
 - `routes_segments` window size: backfill uses 14-day chunks (`CHUNK_DAYS`). If a chunk looks truncated (~1000 rows), lower it.
-- Stub Cap’n Proto schema vs a **real pre-`selfdriveState` qlog**: modern logs should parse `selfdriveState.enabled`. For old `controlsState` logs, point `OPENPILOT_PATH` at an openpilot checkout so `cereal.log.Event` is used.
 
 ## Setup (Debian)
 
@@ -104,6 +122,8 @@ python3 -m op_usage nightly -v      # watermark + last 24h only
 python3 -m op_usage generate        # rebuild HTML from cache, no API
 ```
 
+If a previous run cached `engaged_time_s=0` for every route, add `--reparse-engaged` to `backfill` (see above).
+
 ### 5. Cloudflare Pages
 
 1. Create a Pages project named `op-usage` (or set `CF_PAGES_PROJECT`).
@@ -137,7 +157,8 @@ meta
   watermark_ms     max start_time of listed routes (incremental cursor)
   last_run_iso
   dongle_id
-  schema_version
+    schema_version        bumped to 2 with the Event.valid-@67 stub fix;
+                          does not auto-wipe engaged rows — use --reparse-engaged
 
 drives             one row per route
   route_name PK
@@ -155,7 +176,9 @@ Nightly fetch window: `watermark - 24h` → now. Recheck last day if `maxqlog` i
 |---------|----------------|
 | `python -m op_usage demo` | Fixture drives → HTML, no JWT |
 | `python -m op_usage backfill` | Full history, parse uncached qlogs, write HTML |
+| `python -m op_usage backfill --reparse-engaged` | Same, but clear cached engaged times first (re-download qlogs) |
 | `python -m op_usage nightly` | Incremental + 24h recheck, write HTML |
+| `python -m op_usage nightly --reparse-engaged` | Incremental listing, but reparse every listed route’s qlogs |
 | `python -m op_usage generate` | HTML from sqlite only |
 | `python -m op_usage deploy` | `wrangler pages deploy` |
 | `python -m op_usage deploy --dry-run` | Print the wrangler command |
