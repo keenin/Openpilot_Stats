@@ -22,29 +22,14 @@ def render_site(
     display_tz: str,
     mode: str = "live",
 ) -> str:
+    del owner_name, mode  # not shown; page is table + last-updated only
     tz = ZoneInfo(display_tz)
     generated_local = generated_at.astimezone(tz)
     stamp = generated_local.strftime("%Y-%m-%d %H:%M %Z")
     rows = "\n".join(_commit_block(c, tz) for c in commits)
-    empty = ""
-    if not commits:
-        empty = """
-        <p class="empty">No commits with ≥3 qualifying drives yet.
-        Qualifying = ≥1 mile and engaged time &gt; 0.</p>
-        """
-    demo_banner = ""
-    if mode == "demo":
-        demo_banner = (
-            '<p class="banner">Demo data — fixture drives, not this machine’s comma account.</p>'
-        )
     return _PAGE.format(
-        owner=html.escape(owner_name),
         stamp=html.escape(stamp),
-        tz=html.escape(display_tz),
-        count=len(commits),
         rows=rows,
-        empty=empty,
-        demo_banner=demo_banner,
     )
 
 
@@ -129,13 +114,11 @@ def _commit_block(commit: CommitRow, tz: ZoneInfo) -> str:
           </button>
         </td>
         <td class="num">{format_miles(commit.total_miles)}</td>
-        <td class="eng">
-          <span>{format_duration(commit.engaged_time_s)}</span>
-          <span class="pct">{format_pct(commit.engage_pct)}</span>
-        </td>
+        <td class="num">{format_duration(commit.engaged_time_s)}</td>
+        <td class="num pct">{format_pct(commit.engage_pct)}</td>
       </tr>
       <tr class="detail" hidden>
-        <td colspan="6">
+        <td colspan="7">
           <table class="nested">
             <thead>
               <tr><th>Drive</th><th>Miles</th><th>Engage %</th></tr>
@@ -165,8 +148,7 @@ _PAGE = """<!DOCTYPE html>
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="description" content="Personal openpilot usage — engaged time per flashed commit">
-  <title>{owner} · openpilot usage</title>
+  <title>openpilot</title>
   <style>
     :root {{
       --bg: #0f1218;
@@ -175,7 +157,6 @@ _PAGE = """<!DOCTYPE html>
       --muted: #8b93a2;
       --line: #2a3140;
       --accent: #3dde7a;
-      --accent-dim: #1b3d2a;
       --btn: #222838;
     }}
     * {{ box-sizing: border-box; }}
@@ -189,51 +170,31 @@ _PAGE = """<!DOCTYPE html>
     main {{
       max-width: 1080px;
       margin: 0 auto;
-      padding: 2.2rem 1.2rem 4rem;
-    }}
-    header h1 {{
-      font-size: 1.45rem;
-      font-weight: 650;
-      letter-spacing: -0.02em;
-      margin: 0 0 0.35rem;
-    }}
-    header p, .note, .empty, footer {{
-      color: var(--muted);
-      font-size: 0.92rem;
-    }}
-    .banner {{
-      background: var(--accent-dim);
-      color: var(--accent);
-      padding: 0.55rem 0.8rem;
-      border-radius: 8px;
-      font-size: 0.9rem;
+      padding: 1.5rem 1rem 2.5rem;
     }}
     table.main {{
       width: 100%;
       border-collapse: collapse;
       background: var(--card);
-      border-radius: 12px;
+      border-radius: 10px;
       overflow: hidden;
-      margin-top: 1.2rem;
     }}
     table.main thead th {{
       text-align: left;
       font-size: 0.75rem;
-      letter-spacing: 0.06em;
+      letter-spacing: 0.04em;
       text-transform: uppercase;
       color: var(--muted);
-      padding: 0.75rem 0.9rem;
+      font-weight: 600;
+      padding: 0.65rem 0.8rem;
       border-bottom: 1px solid var(--line);
     }}
     table.main td {{
-      padding: 0.7rem 0.9rem;
+      padding: 0.6rem 0.8rem;
       border-bottom: 1px solid var(--line);
       vertical-align: top;
     }}
-    .branch {{
-      font-weight: 600;
-      word-break: break-all;
-    }}
+    .branch {{ word-break: break-all; }}
     .mono, .hash {{
       font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
       font-size: 0.92rem;
@@ -241,18 +202,13 @@ _PAGE = """<!DOCTYPE html>
     a.hash {{ color: var(--accent); text-decoration: none; }}
     a.hash:hover {{ text-decoration: underline; }}
     .num {{ font-variant-numeric: tabular-nums; }}
-    .eng {{ display: flex; gap: 0.65rem; align-items: baseline; flex-wrap: wrap; }}
-    .pct {{
-      color: var(--accent);
-      font-weight: 650;
-      font-variant-numeric: tabular-nums;
-    }}
+    .pct {{ color: var(--accent); font-weight: 650; }}
     button.expand {{
       background: var(--btn);
       color: var(--ink);
       border: 1px solid var(--line);
       border-radius: 999px;
-      padding: 0.15rem 0.7rem;
+      padding: 0.1rem 0.65rem;
       cursor: pointer;
       font: inherit;
       font-variant-numeric: tabular-nums;
@@ -268,44 +224,40 @@ _PAGE = """<!DOCTYPE html>
       border-radius: 8px;
     }}
     table.nested th, table.nested td {{
-      padding: 0.4rem 0.6rem;
+      padding: 0.35rem 0.55rem;
       font-size: 0.88rem;
       border-bottom: 1px solid var(--line);
     }}
-    footer {{ margin-top: 1.4rem; }}
+    .updated {{
+      color: var(--muted);
+      font-size: 0.8rem;
+      margin: 0.7rem 0.15rem 0;
+    }}
     @media (max-width: 720px) {{
       table.main thead {{ display: none; }}
       table.main, table.main tbody, table.main tr, table.main td {{ display: block; width: 100%; }}
-      table.main td {{ border-bottom: none; padding: 0.25rem 0.9rem; }}
-      table.main tbody.commit {{ border-bottom: 1px solid var(--line); padding: 0.6rem 0; }}
+      table.main td {{ border-bottom: none; padding: 0.2rem 0.8rem; }}
+      table.main tbody.commit {{ border-bottom: 1px solid var(--line); padding: 0.5rem 0; }}
     }}
   </style>
 </head>
 <body>
   <main>
-    <header>
-      <h1>{owner} · openpilot usage</h1>
-      <p>Personal engaged-time by flashed commit. Private drives only — not community data.</p>
-      {demo_banner}
-    </header>
-    <p class="note">Include a drive if it is ≥ 1 mile and engaged time &gt; 0.
-      A commit is listed only with ≥ 3 such drives. Sorted by last qualifying drive, newest first.
-      Engage % = engaged time / total drive time.</p>
     <table class="main">
       <thead>
         <tr>
           <th>Branch</th>
-          <th>Git commit</th>
+          <th>Commit</th>
           <th>Date range</th>
           <th>Drives</th>
-          <th>Total miles</th>
-          <th>Engaged / %</th>
+          <th>Miles</th>
+          <th>Engaged time</th>
+          <th>Engage %</th>
         </tr>
       </thead>
       {rows}
     </table>
-    {empty}
-    <footer>Generated {stamp} · {count} commits · {tz} · static page, no live comma API</footer>
+    <p class="updated">Updated {stamp}</p>
   </main>
   <script>
     document.querySelectorAll("button.expand").forEach(function (btn) {{
