@@ -86,6 +86,98 @@ def test_normalize_route_segments() -> None:
     assert routes[0].git_commit == "abc"
 
 
+def test_normalize_prefers_distance_over_length() -> None:
+    """Live routes_segments uses `distance` (miles). OpenAPI still says `length`.
+
+    commaai/connect copies length → distance only when distance is absent.
+    A leftover tiny `length` must not hide a real `distance`.
+    """
+    payload = [
+        {
+            "fullname": "d|r",
+            "dongle_id": "d",
+            "distance": 18.4,
+            "length": 0.00179515,
+            "git_commit": "abc",
+            "git_branch": "nightly",
+            "git_remote": "",
+            "maxqlog": 2,
+            "segment_start_times": [1000],
+            "segment_end_times": [61000],
+        }
+    ]
+    routes = normalize_routes(payload, "d")
+    assert routes[0].length_miles == 18.4
+
+
+def test_normalize_distance_only() -> None:
+    payload = [
+        {
+            "fullname": "d|r",
+            "dongle_id": "d",
+            "distance": 9.25,
+            "git_commit": "abc",
+            "git_branch": "n",
+            "git_remote": "",
+            "maxqlog": 1,
+            "segment_start_times": [1],
+            "segment_end_times": [2],
+        }
+    ]
+    routes = normalize_routes(payload, "d")
+    assert routes[0].length_miles == 9.25
+
+
+def test_normalize_missing_length_is_zero() -> None:
+    payload = [
+        {
+            "fullname": "d|r",
+            "dongle_id": "d",
+            "git_commit": "abc",
+            "git_branch": "n",
+            "git_remote": "",
+            "maxqlog": 1,
+            "segment_start_times": [1],
+            "segment_end_times": [2],
+        }
+    ]
+    routes = normalize_routes(payload, "d")
+    assert routes[0].length_miles == 0.0
+
+
+def test_normalize_explicit_zero_distance_not_overridden_by_length() -> None:
+    payload = [
+        {
+            "fullname": "d|r",
+            "dongle_id": "d",
+            "distance": 0,
+            "length": 12.5,
+            "git_commit": "abc",
+            "git_branch": "n",
+            "git_remote": "",
+            "maxqlog": 1,
+            "segment_start_times": [1],
+            "segment_end_times": [2],
+        }
+    ]
+    routes = normalize_routes(payload, "d")
+    assert routes[0].length_miles == 0.0
+
+
+def test_upsert_route_meta_refreshes_length_without_clearing_engaged(tmp_path) -> None:
+    """Metadata backfill rewrites length_miles; cached qlog parses stay put."""
+    with Cache(tmp_path / "c.sqlite") as cache:
+        cache.upsert_route_meta(_row(length_miles=0.0, qlog_parsed=False, engaged_time_s=None))
+        cache.save_engaged("d|r", 42.0, "selfdriveState.enabled")
+        cache.upsert_route_meta(_row(length_miles=12.5, qlog_parsed=False, engaged_time_s=None))
+        row = cache.get_drive("d|r")
+        assert row is not None
+        assert row.length_miles == 12.5
+        assert row.engaged_time_s == 42.0
+        assert row.qlog_parsed is True
+        assert row.engaged_source == "selfdriveState.enabled"
+
+
 def test_normalize_groups_segments() -> None:
     payload = [
         {
@@ -103,7 +195,7 @@ def test_normalize_groups_segments() -> None:
             "canonical_route_name": "d|r1",
             "dongle_id": "d",
             "number": 1,
-            "length": 0.7,
+            "distance": 0.7,
             "git_commit": "fff",
             "git_branch": "x",
             "git_remote": "",

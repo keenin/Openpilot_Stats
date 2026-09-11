@@ -9,10 +9,16 @@ Verified against public docs (https://api.comma.ai / commaai/comma-api openapi.y
   GET /v1/me
   GET /v1/devices/{dongleId}/routes_segments?start={ms}&end={ms}
        → RouteSegment objects (route metadata + segment_numbers / times)
+       length_miles ← `distance` (miles), else OpenAPI `length` (miles)
   GET /v1/devices/{dongleId}/segments?from={ms}&to={ms}
        → per-minute Segment objects (fallback if routes_segments shape surprises)
   GET /v1/route/{routeName}/files
        → { qlogs: [signed URLs] }  RATE LIMIT 5/min
+
+Route length (miles): live routes_segments objects use `distance`. OpenAPI still
+documents `length`. commaai/connect copies length → distance only when distance
+is absent (back-compat). Both fields are GPS path length in miles — connect
+displays them as mi / (mi × 1.60934) km. We follow that mapping.
 
 TODO (owner-verify on first live run):
   - JWT expiry / refresh. jwt.comma.ai mints user tokens; 401 means mint a new one.
@@ -182,14 +188,13 @@ def normalize_routes(payload: list[dict[str, Any]], dongle_id: str) -> list[Rout
 def _from_route_object(item: dict[str, Any], dongle_id: str) -> RouteMeta:
     name = str(item.get("fullname") or item.get("canonical_route_name") or "")
     start_ms, end_ms = _route_window_ms(item)
-    length = float(item.get("length") or 0.0)
     maxqlog = item.get("maxqlog")
     return RouteMeta(
         route_name=name,
         dongle_id=str(item.get("dongle_id") or dongle_id),
         start_time_utc_ms=start_ms,
         end_time_utc_ms=end_ms,
-        length_miles=length,
+        length_miles=_length_miles(item),
         git_commit=str(item.get("git_commit") or "").strip(),
         git_branch=str(item.get("git_branch") or "").strip(),
         git_remote=str(item.get("git_remote") or "").strip(),
@@ -210,7 +215,7 @@ def _group_segments(segments: list[dict[str, Any]], dongle_id: str) -> list[Rout
         ends = [_scalar_ms(s, "end_time_utc_millis") for s in segs]
         starts = [x for x in starts if x]
         ends = [x for x in ends if x]
-        length = sum(float(s.get("length") or 0.0) for s in segs)
+        length = sum(_length_miles(s) for s in segs)
         head = segs[0]
         qlogs = [s.get("proc_qlog") for s in segs if s.get("proc_qlog") is not None]
         maxqlog = max((s.get("number") or 0) for s in segs) if segs else None
@@ -230,6 +235,29 @@ def _group_segments(segments: list[dict[str, Any]], dongle_id: str) -> list[Rout
             )
         )
     return routes
+
+
+def _length_miles(item: dict[str, Any]) -> float:
+    """GPS path length in miles from a RouteSegment or Segment object.
+
+    Live API / connect: `distance` (miles). OpenAPI / older payloads: `length`
+    (also miles). Prefer distance when it is present — even if it is 0 — so a
+    leftover `length` of a few thousandths of a mile cannot wipe a real drive.
+    Same rule as commaai/connect checkRoutesData:
+      if (r.distance == null && r.length != null) r.distance = r.length
+    """
+    raw = item.get("distance")
+    if raw is None:
+        raw = item.get("length")
+    if raw is None:
+        raw = item.get("length_miles")
+    try:
+        miles = float(raw)
+    except (TypeError, ValueError):
+        return 0.0
+    if miles < 0.0:
+        return 0.0
+    return miles
 
 
 def _route_window_ms(item: dict[str, Any]) -> tuple[int, int]:

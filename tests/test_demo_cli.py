@@ -26,7 +26,19 @@ def test_reparse_engaged_flag_is_documented(capsys) -> None:
         main(["backfill", "--help"])
     except SystemExit as exc:
         assert exc.code == 0
-    assert "--reparse-engaged" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "--reparse-engaged" in out
+    assert "--metadata-only" in out
+
+
+def test_metadata_only_conflicts_with_reparse(capsys) -> None:
+    try:
+        main(["backfill", "--metadata-only", "--reparse-engaged"])
+    except SystemExit as exc:
+        assert exc.code == 2
+    else:
+        raise AssertionError("expected argparse conflict")
+    assert "--metadata-only cannot be combined with --reparse-engaged" in capsys.readouterr().err
 
 
 def test_deploy_dry_run(tmp_path, capsys) -> None:
