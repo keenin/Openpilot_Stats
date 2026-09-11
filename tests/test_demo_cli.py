@@ -15,6 +15,10 @@ def test_demo_cli_writes_index(tmp_path) -> None:
     html = (out / "index.html").read_text(encoding="utf-8")
     assert "nightly-togo" in html
     assert "wip-two-drives" not in html
+    assert "<h1" not in html
+    assert "Demo data" not in html
+    assert "Updated " in html
+    assert "<th>Engage %</th>" in html
 
 
 def test_deploy_dry_run(tmp_path, capsys) -> None:
