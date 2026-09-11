@@ -34,6 +34,15 @@ def main(argv: list[str] | None = None) -> int:
             "Needed once after the Event-schema fix so bad zeros are not skipped."
         ),
     )
+    reparse.add_argument(
+        "--metadata-only",
+        action="store_true",
+        help=(
+            "Re-list route metadata (length_miles, times, git_*) from the comma API "
+            "and skip every qlog download. Use after the distance-field fix to refresh "
+            "cached miles without --reparse-engaged."
+        ),
+    )
 
     demo = sub.add_parser("demo", parents=[shared], help="Generate site from fixture JSON (no JWT).")
     demo.add_argument(
@@ -58,6 +67,8 @@ def main(argv: list[str] | None = None) -> int:
     dep.add_argument("--dry-run", action="store_true")
 
     args = parser.parse_args(argv)
+    if getattr(args, "metadata_only", False) and getattr(args, "reparse_engaged", False):
+        parser.error("--metadata-only cannot be combined with --reparse-engaged")
     logging.basicConfig(
         level=logging.DEBUG if args.verbose else logging.INFO,
         format="%(asctime)s %(levelname)s %(message)s",
@@ -75,14 +86,29 @@ def main(argv: list[str] | None = None) -> int:
         print(f"wrote {path}")
         return 0
     if args.cmd == "backfill":
-        stats = run_pipeline(settings, backfill=True, reparse_engaged=args.reparse_engaged)
-        print(f"backfill listed={stats.routes_listed} parsed={stats.qlogs_parsed} → {stats.html_path}")
+        stats = run_pipeline(
+            settings,
+            backfill=True,
+            reparse_engaged=args.reparse_engaged,
+            metadata_only=args.metadata_only,
+        )
+        extra = " metadata_only" if args.metadata_only else ""
+        print(
+            f"backfill listed={stats.routes_listed} parsed={stats.qlogs_parsed}"
+            f"{extra} → {stats.html_path}"
+        )
         return 0
     if args.cmd == "nightly":
-        stats = run_pipeline(settings, backfill=False, reparse_engaged=args.reparse_engaged)
+        stats = run_pipeline(
+            settings,
+            backfill=False,
+            reparse_engaged=args.reparse_engaged,
+            metadata_only=args.metadata_only,
+        )
+        extra = " metadata_only" if args.metadata_only else ""
         print(
             f"nightly listed={stats.routes_listed} parsed={stats.qlogs_parsed} "
-            f"cached_skip={stats.qlogs_skipped_cached} → {stats.html_path}"
+            f"cached_skip={stats.qlogs_skipped_cached}{extra} → {stats.html_path}"
         )
         return 0
     if args.cmd == "deploy":
