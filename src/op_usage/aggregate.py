@@ -3,6 +3,10 @@
 A drive is included only if length >= 1 mile AND engaged time > 0.
 A commit appears only if it has >= 3 qualifying drives.
 Commits sort by last qualifying drive (newest first) — never by engage %.
+
+Engage % = engaged_time_s / not_in_park_time_s (qlog gear integral).
+Falls back to API wall-clock total_drive_time_s if not_in_park_time_s
+has not been parsed yet.
 """
 
 from __future__ import annotations
@@ -19,15 +23,15 @@ class DriveView:
     start_time_utc_ms: int
     length_miles: float
     engaged_time_s: float
-    total_drive_time_s: float
+    not_in_park_time_s: float
     git_branch: str
     git_commit: str
 
     @property
     def engage_pct(self) -> float:
-        if self.total_drive_time_s <= 0:
+        if self.not_in_park_time_s <= 0:
             return 0.0
-        return 100.0 * self.engaged_time_s / self.total_drive_time_s
+        return 100.0 * self.engaged_time_s / self.not_in_park_time_s
 
 
 @dataclass
@@ -40,14 +44,14 @@ class CommitRow:
     drive_count: int
     total_miles: float
     engaged_time_s: float
-    total_drive_time_s: float
+    not_in_park_time_s: float
     drives: list[DriveView] = field(default_factory=list)
 
     @property
     def engage_pct(self) -> float:
-        if self.total_drive_time_s <= 0:
+        if self.not_in_park_time_s <= 0:
             return 0.0
-        return 100.0 * self.engaged_time_s / self.total_drive_time_s
+        return 100.0 * self.engaged_time_s / self.not_in_park_time_s
 
     @property
     def short_hash(self) -> str:
@@ -63,13 +67,20 @@ def qualifies(drive: DriveRow, min_miles: float = MIN_MILES) -> bool:
     return engaged > 0
 
 
+def denominator_s(drive: DriveRow) -> float:
+    """Engage-% denominator: not-in-park seconds, else API wall-clock."""
+    if drive.not_in_park_time_s is not None:
+        return float(drive.not_in_park_time_s)
+    return float(drive.total_drive_time_s)
+
+
 def to_drive_view(drive: DriveRow) -> DriveView:
     return DriveView(
         route_name=drive.route_name,
         start_time_utc_ms=drive.start_time_utc_ms,
         length_miles=drive.length_miles,
         engaged_time_s=float(drive.engaged_time_s or 0.0),
-        total_drive_time_s=drive.total_drive_time_s,
+        not_in_park_time_s=denominator_s(drive),
         git_branch=drive.git_branch,
         git_commit=drive.git_commit,
     )
@@ -101,7 +112,7 @@ def aggregate_commits(
                 drive_count=len(group),
                 total_miles=sum(d.length_miles for d in group),
                 engaged_time_s=sum(float(d.engaged_time_s or 0.0) for d in group),
-                total_drive_time_s=sum(d.total_drive_time_s for d in group),
+                not_in_park_time_s=sum(denominator_s(d) for d in group),
                 drives=[to_drive_view(d) for d in group],
             )
         )

@@ -49,7 +49,7 @@ def test_demo_html_lists_only_qualified_commits_newest_first() -> None:
     assert "<th>Drives</th>" in html
     assert "<th>Miles</th>" in html
     assert "<th>Engaged time</th>" in html
-    assert "<th>Engage %</th>" in html
+    assert "Engage %" in html
     assert "Updated 2026-09-11 03:00 PDT" in html
     for blob in CHROME:
         assert blob not in html

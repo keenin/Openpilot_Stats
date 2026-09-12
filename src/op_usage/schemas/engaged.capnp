@@ -7,11 +7,15 @@
 #                            # is reported as u129 and never sampled.
 #   Event.union:
 #     controlsState @7
+#     carState @22            # cereal: Car.CarState (opendbc car.capnp)
 #     selfdriveState @130
 #     (placeholders through @160; cereal currently tops out at @152)
 #   SelfdriveState.enabled @1
 #   ControlsState.enabled @19
 #     (cereal nested this under deprecated :group; same ordinal / wire bit)
+#   CarState.gearShifter @14 : GearShifter
+#     unknown @0, park @1, drive @2, neutral @3, reverse @4,
+#     sport @5, low @6, brake @7, eco @8, manumatic @9
 #
 # Unused union members are AnyPointer placeholders so the capnp compiler
 # accepts consecutive union ordinals (with the required @67 hole).
@@ -23,6 +27,42 @@ struct SelfdriveState {
   state @0 :UInt16;
   enabled @1 :Bool;
   active @2 :Bool;
+}
+
+# CarState overlay: gearShifter @14 plus typed placeholders so the enum
+# packs like cereal/opendbc (same ordinal as car.capnp).
+enum GearShifter {
+  unknown @0;
+  park @1;
+  drive @2;
+  neutral @3;
+  reverse @4;
+  sport @5;
+  low @6;
+  brake @7;
+  eco @8;
+  manumatic @9;
+}
+
+struct CarState {
+  # Placeholders @0–@13 match cereal/opendbc CarState types so gearShifter @14
+  # packs at the same data-section offset. Void would leave a hole (illegal)
+  # and would also misalign the enum on the wire.
+  errors @0 :AnyPointer;
+  vEgo @1 :Float32;
+  wheelSpeeds @2 :AnyPointer;
+  gas @3 :Float32;
+  gasPressed @4 :Bool;
+  brake @5 :Float32;
+  brakePressed @6 :Bool;
+  steeringAngleDeg @7 :Float32;
+  steeringTorque @8 :Float32;
+  steeringPressed @9 :Bool;
+  cruiseState @10 :AnyPointer;
+  buttonEvents @11 :AnyPointer;
+  canMonoTimes @12 :AnyPointer;
+  events @13 :AnyPointer;
+  gearShifter @14 :GearShifter;
 }
 
 struct ControlsState {
@@ -73,7 +113,7 @@ struct Event {
     u19 @19 :AnyPointer;
     u20 @20 :AnyPointer;
     u21 @21 :AnyPointer;
-    u22 @22 :AnyPointer;
+    carState @22 :CarState;
     u23 @23 :AnyPointer;
     u24 @24 :AnyPointer;
     u25 @25 :AnyPointer;

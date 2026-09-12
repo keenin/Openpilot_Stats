@@ -8,9 +8,12 @@ Schema (see README for the same picture):
     dongle_id
     schema_version
 
-  drives(...) one row per route; engaged_time_s cached so old qlogs are
-  never re-parsed once qlog_parsed=1 and the route is outside the recheck
-  window.
+  drives(...) one row per route; engaged_time_s and not_in_park_time_s
+  are cached so old qlogs are never re-parsed once qlog_parsed=1 and the
+  route is outside the recheck window.
+
+  total_drive_time_s is API wall-clock (end-start). Engage % uses
+  not_in_park_time_s (qlog gear integral) after a parse.
 """
 
 from __future__ import annotations
@@ -21,7 +24,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable, Iterator
 
-SCHEMA_VERSION = "2"  # Event.valid @67 outside union; does not auto-clear engaged rows
+SCHEMA_VERSION = "3"  # not_in_park_time_s; does not auto-clear qlog rows
 
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS meta (
@@ -42,6 +45,7 @@ CREATE TABLE IF NOT EXISTS drives (
   maxqlog INTEGER,
   engaged_time_s REAL,
   engaged_source TEXT,
+  not_in_park_time_s REAL,
   qlog_parsed INTEGER NOT NULL DEFAULT 0,
   updated_at TEXT NOT NULL
 );
@@ -67,6 +71,7 @@ class DriveRow:
     engaged_source: str | None
     qlog_parsed: bool
     updated_at: str = ""
+    not_in_park_time_s: float | None = None
 
 
 class Cache:
@@ -77,10 +82,17 @@ class Cache:
         self._conn.row_factory = sqlite3.Row
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.executescript(SCHEMA_SQL)
+        self._migrate_drives_columns()
         previous = self.get_meta("schema_version")
         self.set_meta("schema_version", SCHEMA_VERSION)
         self._conn.commit()
         self.schema_upgraded_from = previous if previous and previous != SCHEMA_VERSION else None
+
+    def _migrate_drives_columns(self) -> None:
+        """Add columns introduced after the original CREATE TABLE."""
+        cols = {str(row[1]) for row in self._conn.execute("PRAGMA table_info(drives)")}
+        if "not_in_park_time_s" not in cols:
+            self._conn.execute("ALTER TABLE drives ADD COLUMN not_in_park_time_s REAL")
 
     def close(self) -> None:
         self._conn.close()
@@ -150,8 +162,9 @@ class Cache:
             INSERT INTO drives (
               route_name, dongle_id, start_time_utc_ms, end_time_utc_ms,
               length_miles, total_drive_time_s, git_commit, git_branch, git_remote,
-              maxqlog, engaged_time_s, engaged_source, qlog_parsed, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)
+              maxqlog, engaged_time_s, engaged_source, not_in_park_time_s,
+              qlog_parsed, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)
             ON CONFLICT(route_name) DO UPDATE SET
               dongle_id = excluded.dongle_id,
               start_time_utc_ms = excluded.start_time_utc_ms,
@@ -177,6 +190,7 @@ class Cache:
                 drive.maxqlog,
                 drive.engaged_time_s,
                 drive.engaged_source,
+                drive.not_in_park_time_s,
                 _now(),
             ),
         )
@@ -186,21 +200,25 @@ class Cache:
         route_name: str,
         engaged_time_s: float,
         engaged_source: str,
+        not_in_park_time_s: float | None = None,
     ) -> None:
         self._conn.execute(
             """
             UPDATE drives SET
-              engaged_time_s = ?, engaged_source = ?, qlog_parsed = 1, updated_at = ?
+              engaged_time_s = ?, engaged_source = ?, not_in_park_time_s = ?,
+              qlog_parsed = 1, updated_at = ?
             WHERE route_name = ?
             """,
-            (engaged_time_s, engaged_source, _now(), route_name),
+            (engaged_time_s, engaged_source, not_in_park_time_s, _now(), route_name),
         )
 
     def clear_engaged_parses(self) -> int:
         """Drop cached qlog results so the next fetch re-reads every route.
 
         Use after a parser fix: qlog_parsed=1 with engaged_time_s=0 is treated as
-        a successful parse and is otherwise skipped forever.
+        a successful parse and is otherwise skipped forever. Also clears
+        not_in_park_time_s so --reparse-engaged recomputes the engage-%
+        denominator from qlogs.
         """
         cur = self._conn.execute(
             """
@@ -208,6 +226,7 @@ class Cache:
               qlog_parsed = 0,
               engaged_time_s = NULL,
               engaged_source = NULL,
+              not_in_park_time_s = NULL,
               updated_at = ?
             """,
             (_now(),),
@@ -239,8 +258,9 @@ class Cache:
                 INSERT INTO drives (
                   route_name, dongle_id, start_time_utc_ms, end_time_utc_ms,
                   length_miles, total_drive_time_s, git_commit, git_branch, git_remote,
-                  maxqlog, engaged_time_s, engaged_source, qlog_parsed, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)
+                  maxqlog, engaged_time_s, engaged_source, not_in_park_time_s,
+                  qlog_parsed, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)
                 """,
                 (
                     drive.route_name,
@@ -255,6 +275,7 @@ class Cache:
                     drive.maxqlog,
                     drive.engaged_time_s,
                     drive.engaged_source,
+                    drive.not_in_park_time_s,
                     _now(),
                 ),
             )
@@ -292,4 +313,13 @@ def _row_to_drive(row: sqlite3.Row) -> DriveRow:
         engaged_source=row["engaged_source"],
         qlog_parsed=bool(row["qlog_parsed"]),
         updated_at=row["updated_at"] or "",
+        not_in_park_time_s=_optional_float(row, "not_in_park_time_s"),
     )
+
+
+def _optional_float(row: sqlite3.Row, key: str) -> float | None:
+    try:
+        raw = row[key]
+    except (IndexError, KeyError):
+        return None
+    return None if raw is None else float(raw)

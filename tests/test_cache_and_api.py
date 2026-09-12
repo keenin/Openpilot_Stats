@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from op_usage.cache import Cache, DriveRow
+from op_usage.cache import SCHEMA_VERSION, Cache, DriveRow
 from op_usage.comma_api import iter_time_chunks, normalize_routes
 
 
@@ -24,6 +24,48 @@ def _row(**kwargs) -> DriveRow:
     return DriveRow(**base)
 
 
+def test_migrates_not_in_park_column_on_old_sqlite(tmp_path) -> None:
+    import sqlite3
+
+    path = tmp_path / "old.sqlite"
+    conn = sqlite3.connect(path)
+    conn.executescript(
+        """
+        CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+        CREATE TABLE drives (
+          route_name TEXT PRIMARY KEY,
+          dongle_id TEXT NOT NULL,
+          start_time_utc_ms INTEGER NOT NULL,
+          end_time_utc_ms INTEGER NOT NULL,
+          length_miles REAL NOT NULL,
+          total_drive_time_s REAL NOT NULL,
+          git_commit TEXT,
+          git_branch TEXT,
+          git_remote TEXT,
+          maxqlog INTEGER,
+          engaged_time_s REAL,
+          engaged_source TEXT,
+          qlog_parsed INTEGER NOT NULL DEFAULT 0,
+          updated_at TEXT NOT NULL
+        );
+        INSERT INTO meta(key, value) VALUES ('schema_version', '2');
+        INSERT INTO drives VALUES (
+          'd|r', 'd', 1, 2, 3.0, 100.0, 'abc', 'n', '', 1,
+          10.0, 'selfdriveState.enabled', 1, 't'
+        );
+        """
+    )
+    conn.commit()
+    conn.close()
+    with Cache(path) as cache:
+        assert cache.schema_upgraded_from == "2"
+        assert cache.get_meta("schema_version") == SCHEMA_VERSION
+        row = cache.get_drive("d|r")
+        assert row is not None
+        assert row.engaged_time_s == 10.0
+        assert row.not_in_park_time_s is None
+
+
 def test_watermark_only_moves_forward(tmp_path) -> None:
     with Cache(tmp_path / "c.sqlite") as cache:
         cache.set_watermark_ms(50)
@@ -36,10 +78,11 @@ def test_watermark_only_moves_forward(tmp_path) -> None:
 def test_clear_engaged_parses_allows_reparse(tmp_path) -> None:
     with Cache(tmp_path / "c.sqlite") as cache:
         cache.upsert_route_meta(_row(qlog_parsed=False, engaged_time_s=None))
-        cache.save_engaged("d|r", 0.0, "controlsState.enabled")
+        cache.save_engaged("d|r", 0.0, "controlsState.enabled", 50.0)
         existing = cache.get_drive("d|r")
         assert existing and existing.qlog_parsed
         assert existing.engaged_time_s == 0.0
+        assert existing.not_in_park_time_s == 50.0
         assert cache.needs_qlog_parse(_row(maxqlog=1), recheck_after_ms=10_000) is False
         n = cache.clear_engaged_parses()
         assert n == 1
@@ -47,6 +90,7 @@ def test_clear_engaged_parses_allows_reparse(tmp_path) -> None:
         assert cleared and not cleared.qlog_parsed
         assert cleared.engaged_time_s is None
         assert cleared.engaged_source is None
+        assert cleared.not_in_park_time_s is None
         assert cache.needs_qlog_parse(_row(maxqlog=1), recheck_after_ms=10_000) is True
 
 
@@ -168,7 +212,7 @@ def test_upsert_route_meta_refreshes_length_without_clearing_engaged(tmp_path) -
     """Metadata backfill rewrites length_miles; cached qlog parses stay put."""
     with Cache(tmp_path / "c.sqlite") as cache:
         cache.upsert_route_meta(_row(length_miles=0.0, qlog_parsed=False, engaged_time_s=None))
-        cache.save_engaged("d|r", 42.0, "selfdriveState.enabled")
+        cache.save_engaged("d|r", 42.0, "selfdriveState.enabled", 80.0)
         cache.upsert_route_meta(_row(length_miles=12.5, qlog_parsed=False, engaged_time_s=None))
         row = cache.get_drive("d|r")
         assert row is not None
@@ -176,6 +220,7 @@ def test_upsert_route_meta_refreshes_length_without_clearing_engaged(tmp_path) -
         assert row.engaged_time_s == 42.0
         assert row.qlog_parsed is True
         assert row.engaged_source == "selfdriveState.enabled"
+        assert row.not_in_park_time_s == 80.0
 
 
 def test_normalize_groups_segments() -> None:
