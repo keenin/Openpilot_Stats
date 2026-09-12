@@ -212,29 +212,46 @@ class Cache:
             (engaged_time_s, engaged_source, not_in_park_time_s, _now(), route_name),
         )
 
-    def clear_engaged_parses(self) -> int:
-        """Drop cached qlog results so the next fetch re-reads every route.
+    def clear_engaged_parses(self, route_names: Iterable[str] | None = None) -> int:
+        """Drop cached qlog results so the next fetch re-reads those routes.
 
-        Use after a parser fix: qlog_parsed=1 with engaged_time_s=0 is treated as
-        a successful parse and is otherwise skipped forever. Also clears
-        not_in_park_time_s so --reparse-engaged recomputes the engage-%
-        denominator from qlogs.
+        Use after a parser fix: qlog_parsed=1 (including engaged_time_s=0 or
+        a NULL not_in_park_time_s) is otherwise skipped forever.
+
+        If route_names is given, only those rows are cleared — so
+        nightly --reparse-engaged cannot wipe history outside the fetch window.
+        Omit route_names to clear every drive (the SQL-equivalent documented
+        in the README).
         """
-        cur = self._conn.execute(
-            """
+        sql = """
             UPDATE drives SET
               qlog_parsed = 0,
               engaged_time_s = NULL,
               engaged_source = NULL,
               not_in_park_time_s = NULL,
               updated_at = ?
-            """,
-            (_now(),),
-        )
+        """
+        if route_names is None:
+            cur = self._conn.execute(sql, (_now(),))
+        else:
+            names = [name for name in route_names if name]
+            if not names:
+                return 0
+            placeholders = ",".join("?" * len(names))
+            cur = self._conn.execute(
+                f"{sql} WHERE route_name IN ({placeholders})",
+                (_now(), *names),
+            )
         return int(cur.rowcount or 0)
 
     def needs_qlog_parse(self, drive: DriveRow, recheck_after_ms: int) -> bool:
-        """Old parsed routes are never re-read. Recheck window may retry if maxqlog grew."""
+        """True if incoming API metadata still needs a qlog download.
+
+        `drive` must be the *new* listing (especially maxqlog), compared
+        against the cached row. Call this before upsert_route_meta — after
+        an upsert the cached maxqlog already matches, so the 24h
+        “maxqlog grew” recheck never fires.
+        """
         existing = self.get_drive(drive.route_name)
         if existing is None:
             return True

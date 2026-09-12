@@ -21,6 +21,20 @@ def test_demo_cli_writes_index(tmp_path) -> None:
     assert "Engage %" in html
 
 
+def test_verbose_works_before_or_after_subcommand(tmp_path) -> None:
+    out = tmp_path / "site"
+    cache = tmp_path / "c.sqlite"
+    from op_usage.cache import Cache
+
+    with Cache(cache) as db:
+        db.commit()
+    assert main(["generate", "-v", "--cache", str(cache), "--out", str(out)]) == 0
+    assert (out / "index.html").is_file()
+    out2 = tmp_path / "site2"
+    assert main(["-v", "generate", "--cache", str(cache), "--out", str(out2)]) == 0
+    assert (out2 / "index.html").is_file()
+
+
 def test_reparse_engaged_flag_is_documented(capsys) -> None:
     try:
         main(["backfill", "--help"])

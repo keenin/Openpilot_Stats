@@ -124,9 +124,6 @@ def run_pipeline(
                 cache.schema_upgraded_from,
                 SCHEMA_VERSION,
             )
-        if reparse_engaged:
-            n = cache.clear_engaged_parses()
-            log.info("cleared %d cached qlog parses; will re-download and reparse", n)
         start_ms = _window_start(cache, settings, backfill=backfill, now_ms=now_ms)
         log.info(
             "listing routes %s → now (chunk=%dd, backfill=%s, metadata_only=%s)",
@@ -146,11 +143,12 @@ def run_pipeline(
             log.info("  chunk %s..%s → %d routes", lo, hi, len(chunk))
             if len(payload) >= 1000:
                 log.warning(
-                    "chunk returned %d items — possible API cap. TODO: shrink CHUNK_DAYS.",
+                    "chunk returned %d items — possible API cap; shrink CHUNK_DAYS.",
                     len(payload),
                 )
             listed.extend(chunk)
 
+        listed = _dedupe_routes(listed)
         stats.routes_listed = len(listed)
         miles_gt0 = sum(1 for m in listed if m.length_miles > 0)
         miles_ge1 = sum(1 for m in listed if m.length_miles >= 1)
@@ -165,19 +163,37 @@ def run_pipeline(
                 "every listed route has length_miles=0 after mapping distance/length — "
                 "check the sample keys logged above"
             )
+
+        # Compare incoming maxqlog to the cached row *before* upsert overwrites it.
+        need_parse: set[str] = set()
         for meta in listed:
-            cache.upsert_route_meta(_meta_to_row(meta))
+            incoming = _meta_to_row(meta)
+            if not metadata_only and cache.needs_qlog_parse(incoming, recheck_ms):
+                need_parse.add(meta.route_name)
+            cache.upsert_route_meta(incoming)
             cache.set_watermark_ms(meta.start_time_utc_ms)
+
+        if reparse_engaged:
+            n = cache.clear_engaged_parses(route_names=[m.route_name for m in listed])
+            log.info(
+                "cleared %d cached qlog parses among %d listed routes; "
+                "will re-download and reparse (other cache rows left intact)",
+                n,
+                len(listed),
+            )
+            need_parse = {m.route_name for m in listed}
+
+        cache.commit()
 
         if metadata_only:
             log.info("metadata-only: skipped qlog downloads for %d listed routes", len(listed))
         else:
             for meta in listed:
+                if meta.route_name not in need_parse:
+                    stats.qlogs_skipped_cached += 1
+                    continue
                 row = cache.get_drive(meta.route_name)
                 if row is None:
-                    continue
-                if not cache.needs_qlog_parse(row, recheck_ms):
-                    stats.qlogs_skipped_cached += 1
                     continue
                 try:
                     urls = client.route_qlog_urls(meta.route_name)
@@ -193,6 +209,7 @@ def run_pipeline(
                         result.source,
                         not_in_park,
                     )
+                    cache.commit()
                     stats.qlogs_parsed += 1
                     log.info(
                         "  %s engaged=%.1fs not_in_park=%.1fs source=%s "
@@ -221,6 +238,15 @@ def _log_length_fields(item: dict) -> None:
     for key in ("distance", "length", "length_miles"):
         if key in item:
             log.info("  sample %s=%r", key, item[key])
+
+
+def _dedupe_routes(routes: list[RouteMeta]) -> list[RouteMeta]:
+    """Keep the last listing per route_name; drop nameless rows (chunk overlap)."""
+    by_name: dict[str, RouteMeta] = {}
+    for meta in routes:
+        if meta.route_name:
+            by_name[meta.route_name] = meta
+    return list(by_name.values())
 
 
 def _window_start(cache: Cache, settings: Settings, *, backfill: bool, now_ms: int) -> int:

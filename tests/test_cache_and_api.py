@@ -75,6 +75,22 @@ def test_watermark_only_moves_forward(tmp_path) -> None:
         assert cache.watermark_ms() == 80
 
 
+def test_clear_engaged_parses_can_scope_to_listed_routes(tmp_path) -> None:
+    with Cache(tmp_path / "c.sqlite") as cache:
+        cache.upsert_route_meta(_row(route_name="keep", qlog_parsed=False, engaged_time_s=None))
+        cache.save_engaged("keep", 11.0, "selfdriveState.enabled", 20.0)
+        cache.upsert_route_meta(_row(route_name="wipe", qlog_parsed=False, engaged_time_s=None))
+        cache.save_engaged("wipe", 9.0, "selfdriveState.enabled", 15.0)
+        n = cache.clear_engaged_parses(route_names=["wipe"])
+        assert n == 1
+        kept = cache.get_drive("keep")
+        wiped = cache.get_drive("wipe")
+        assert kept and kept.qlog_parsed and kept.engaged_time_s == 11.0
+        assert wiped and not wiped.qlog_parsed
+        assert wiped.engaged_time_s is None
+        assert wiped.not_in_park_time_s is None
+
+
 def test_clear_engaged_parses_allows_reparse(tmp_path) -> None:
     with Cache(tmp_path / "c.sqlite") as cache:
         cache.upsert_route_meta(_row(qlog_parsed=False, engaged_time_s=None))
@@ -253,6 +269,79 @@ def test_normalize_groups_segments() -> None:
     assert abs(routes[0].length_miles - 1.1) < 1e-9
     assert routes[0].start_time_utc_ms == 10
     assert routes[0].end_time_utc_ms == 30
+
+
+def test_normalize_skips_empty_route_name() -> None:
+    payload = [
+        {
+            "fullname": "",
+            "dongle_id": "d",
+            "distance": 3.0,
+            "git_commit": "abc",
+            "segment_start_times": [1],
+            "segment_end_times": [2],
+        },
+        {
+            "fullname": "d|ok",
+            "dongle_id": "d",
+            "distance": 4.0,
+            "git_commit": "abc",
+            "segment_start_times": [1],
+            "segment_end_times": [2],
+        },
+    ]
+    routes = normalize_routes(payload, "d")
+    assert [r.route_name for r in routes] == ["d|ok"]
+
+
+def test_verify_auth_401() -> None:
+    from op_usage.comma_api import CommaApiError, CommaClient
+
+    class _Resp:
+        status_code = 401
+        text = "unauthorized"
+        headers: dict = {}
+        ok = False
+
+    class _Sess:
+        def get(self, *args, **kwargs):
+            return _Resp()
+
+    client = CommaClient("jwt", "dongle", session=_Sess(), sleeper=lambda _s: None)
+    try:
+        client.verify_auth()
+    except CommaApiError as exc:
+        assert exc.status == 401
+        assert "jwt.comma.ai" in str(exc)
+    else:
+        raise AssertionError("expected 401")
+
+
+def test_download_bytes_retries_server_error() -> None:
+    from op_usage.comma_api import CommaClient
+
+    class _Resp:
+        def __init__(self, status: int, content: bytes = b""):
+            self.status_code = status
+            self.text = ""
+            self.headers: dict = {}
+            self.ok = 200 <= status < 300
+            self.content = content
+
+    class _Sess:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def get(self, *args, **kwargs):
+            self.calls += 1
+            if self.calls < 3:
+                return _Resp(503)
+            return _Resp(200, b"qlog")
+
+    sess = _Sess()
+    client = CommaClient("jwt", "dongle", session=sess, sleeper=lambda _s: None)
+    assert client.download_bytes("https://example.invalid/qlog") == b"qlog"
+    assert sess.calls == 3
 
 
 def test_time_chunks() -> None:

@@ -18,5 +18,5 @@ if [[ -f "$CONFIG" ]]; then
   set +a
 fi
 
-python3 -m op_usage nightly
+python3 -m op_usage nightly -v
 "$ROOT/scripts/deploy.sh"

@@ -2,7 +2,7 @@
 # Deploy: ./scripts/deploy.sh
 #   (wraps: npx wrangler pages deploy ./site --project-name=op-usage)
 #
-# Custom domain later — use the Pages project URL until then.
+# Custom domain: op-stats.keenin.com
 # This file does not enable any Worker JS; public artifact is static HTML only.
 
 name = "op-usage"

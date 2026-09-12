@@ -10,8 +10,8 @@ Verified against public docs (https://api.comma.ai / commaai/comma-api openapi.y
   GET /v1/devices/{dongleId}/routes_segments?start={ms}&end={ms}
        → RouteSegment objects (route metadata + segment_numbers / times)
        length_miles ← `distance` (miles), else OpenAPI `length` (miles)
-  GET /v1/devices/{dongleId}/segments?from={ms}&to={ms}
-       → per-minute Segment objects (fallback if routes_segments shape surprises)
+       normalize_routes also accepts per-minute Segment objects
+       (canonical_route_name) if that shape appears.
   GET /v1/route/{routeName}/files
        → { qlogs: [signed URLs] }  RATE LIMIT 5/min
 
@@ -20,12 +20,9 @@ documents `length`. commaai/connect copies length → distance only when distanc
 is absent (back-compat). Both fields are GPS path length in miles — connect
 displays them as mi / (mi × 1.60934) km. We follow that mapping.
 
-TODO (owner-verify on first live run):
-  - JWT expiry / refresh. jwt.comma.ai mints user tokens; 401 means mint a new one.
-  - routes_segments max page size. We chunk by CHUNK_DAYS (default 14). If a
-    window looks truncated, shrink CHUNK_DAYS.
-  - Newer route ids (dongle|hex--hex) vs classic (dongle|YYYY-MM-DD--HH-MM-SS).
-    Both are treated as opaque strings.
+401 on /v1/me or any JSON call: mint a new user JWT at jwt.comma.ai.
+routes_segments is chunked by CHUNK_DAYS (default 14). If a window looks
+truncated (~1000 rows), shrink CHUNK_DAYS. Route ids are opaque strings.
 """
 
 from __future__ import annotations
@@ -115,6 +112,7 @@ class CommaClient:
             if resp.status_code == 429:
                 wait = float(resp.headers.get("Retry-After", 20))
                 log.warning("rate limited on %s; sleeping %.0fs", path, wait)
+                last_exc = CommaApiError(f"{path} HTTP 429", status=429)
                 self._sleeper(wait)
                 continue
             if resp.status_code >= 500:
@@ -130,7 +128,7 @@ class CommaClient:
         raise CommaApiError(f"{path} failed after retries: {last_exc}")
 
     def verify_auth(self) -> dict[str, Any]:
-        """GET /v1/me — confirms the JWT. TODO: response shape is a user object."""
+        """GET /v1/me — confirms the JWT (401 → mint a new one)."""
         return self._get("/v1/me")
 
     def list_routes_segments(self, start_ms: int, end_ms: int) -> list[dict[str, Any]]:
@@ -139,14 +137,6 @@ class CommaClient:
         payload = self._get(path, params={"start": int(start_ms), "end": int(end_ms)})
         if not isinstance(payload, list):
             raise CommaApiError(f"routes_segments expected a JSON array, got {type(payload).__name__}")
-        return payload
-
-    def list_segments(self, start_ms: int, end_ms: int) -> list[dict[str, Any]]:
-        """GET /v1/devices/{dongleId}/segments?from=&to= — fallback listing."""
-        path = f"/v1/devices/{self.dongle_id}/segments"
-        payload = self._get(path, params={"from": int(start_ms), "to": int(end_ms)})
-        if not isinstance(payload, list):
-            raise CommaApiError(f"segments expected a JSON array, got {type(payload).__name__}")
         return payload
 
     def route_qlog_urls(self, route_name: str) -> list[str]:
@@ -164,10 +154,33 @@ class CommaClient:
 
     def download_bytes(self, url: str) -> bytes:
         """Signed blob URL — no JWT header (the query string is the auth)."""
-        resp = self._session.get(url, timeout=max(self.timeout_s, 120.0))
-        if not resp.ok:
-            raise CommaApiError(f"qlog download HTTP {resp.status_code}", status=resp.status_code)
-        return resp.content
+        timeout = max(self.timeout_s, 120.0)
+        last_exc: Exception | None = None
+        for attempt in range(4):
+            try:
+                resp = self._session.get(url, timeout=timeout)
+            except requests.RequestException as exc:
+                last_exc = exc
+                self._sleeper(min(2**attempt, 16))
+                continue
+            if resp.status_code == 429:
+                wait = float(resp.headers.get("Retry-After", 20))
+                log.warning("rate limited on qlog download; sleeping %.0fs", wait)
+                last_exc = CommaApiError("qlog download HTTP 429", status=429)
+                self._sleeper(wait)
+                continue
+            if resp.status_code >= 500:
+                last_exc = CommaApiError(
+                    f"qlog download HTTP {resp.status_code}", status=resp.status_code
+                )
+                self._sleeper(min(2**attempt, 16))
+                continue
+            if not resp.ok:
+                raise CommaApiError(
+                    f"qlog download HTTP {resp.status_code}", status=resp.status_code
+                )
+            return resp.content
+        raise CommaApiError(f"qlog download failed after retries: {last_exc}")
 
 
 def normalize_routes(payload: list[dict[str, Any]], dongle_id: str) -> list[RouteMeta]:
@@ -176,12 +189,13 @@ def normalize_routes(payload: list[dict[str, Any]], dongle_id: str) -> list[Rout
         return []
     sample = payload[0]
     if "fullname" in sample or "segment_numbers" in sample:
-        return [_from_route_object(item, dongle_id) for item in payload]
+        routes = [_from_route_object(item, dongle_id) for item in payload]
+        return [r for r in routes if r.route_name]
     if "canonical_route_name" in sample or "route_name" in sample:
         return _group_segments(payload, dongle_id)
     raise CommaApiError(
         "unrecognized routes payload; expected RouteSegment (fullname) or Segment "
-        "(canonical_route_name). TODO: dump one object and extend normalize_routes."
+        "(canonical_route_name)"
     )
 
 

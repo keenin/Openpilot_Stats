@@ -36,7 +36,7 @@ The bundled Cap’n Proto stub must keep **`Event.valid @67` outside the union**
 
 Integration uses `logMonoTime` deltas, not sample counts. Gaps > 5s are skipped so a missing segment is not counted as engaged.
 
-Per-route engaged time and not-in-park time are **cached**. Old logs are not re-parsed. Nightly re-checks the last 24h in case uploads are still in flight (`maxqlog` grew).
+Per-route engaged time and not-in-park time are **cached**. Old logs are not re-parsed. Nightly re-checks the last 24h in case uploads are still in flight (`maxqlog` grew). Each successful qlog parse is committed immediately so a multi-hour run can resume after a kill or crash.
 
 ### Not-in-park time (engage % denominator)
 
@@ -62,7 +62,9 @@ Routes already stored with `qlog_parsed=1` are skipped forever, including rows w
 python3 -m op_usage backfill -v --reparse-engaged
 ```
 
-`--reparse-engaged` also works on `nightly`. It clears `qlog_parsed`, `engaged_time_s`, `engaged_source`, and `not_in_park_time_s`. Equivalent SQL on `~/.cache/op-usage/op-usage.sqlite`:
+`--reparse-engaged` clears `qlog_parsed` / timing fields for **routes this run will list**, then re-downloads those qlogs. `backfill` lists full history; `nightly` only lists the watermark − 24h window (historical rows stay intact). If the run is interrupted, resume with plain `backfill` or `nightly` (no flag) — leftover `qlog_parsed=0` rows are picked up. Do not delete the whole sqlite file unless you also want to redo route listing / the watermark.
+
+Equivalent SQL to mark *every* row (same as `backfill --reparse-engaged` after a full list):
 
 ```sql
 UPDATE drives
@@ -71,8 +73,6 @@ SET qlog_parsed = 0,
     engaged_source = NULL,
     not_in_park_time_s = NULL;
 ```
-
-Then run `backfill` or `nightly` as usual (without the flag). Do not delete the whole sqlite file unless you also want to redo route listing / the watermark.
 
 ### Refresh `length_miles` (required once after the distance-field fix)
 
@@ -112,9 +112,7 @@ Auth: `Authorization: JWT <token>` from [jwt.comma.ai](https://jwt.comma.ai) —
 | `GET /v1/route/{routeName}/files` | Signed `qlogs[]` URLs. **Rate limit 5/min** |
 | Signed blob GET | Download `qlog.bz2` / `qlog.zst` |
 
-Fallback listing (if a payload looks like per-minute segments): `GET /v1/devices/{dongleId}/segments?from=&to=`, grouped by `canonical_route_name`.
-
-Cabana/connect use the same files API; this tool only pulls qlogs, never cameras.
+If a `routes_segments` payload looks like per-minute segments (`canonical_route_name`), those objects are grouped into routes. Cabana/connect use the same files API; this tool only pulls qlogs, never cameras.
 
 ### TODOs for the owner (cannot confirm without a live JWT)
 
@@ -182,7 +180,7 @@ chmod +x scripts/deploy.sh scripts/nightly.sh
 ./scripts/deploy.sh
 ```
 
-Uses `wrangler pages deploy ./site`. `wrangler.toml` records `pages_build_output_dir = "site"`. Custom domain later — share the `*.pages.dev` URL for now. No VPS.
+Uses `wrangler pages deploy ./site`. `wrangler.toml` records `pages_build_output_dir = "site"`. Public URL: [op-stats.keenin.com](https://op-stats.keenin.com). No VPS.
 
 Workers static assets instead of Pages: see comments in `wrangler.toml`, then `npx wrangler deploy`.
 
@@ -221,25 +219,27 @@ Nightly fetch window: `watermark - 24h` → now. Recheck last day if `maxqlog` i
 
 ## Commands
 
+`-v` / `--verbose` works **before or after** the subcommand (`backfill -v` or `-v backfill`).
+
 | Command | What it does |
 |---------|----------------|
 | `python -m op_usage demo` | Fixture drives → HTML, no JWT |
 | `python -m op_usage backfill` | Full history, parse uncached qlogs, write HTML |
 | `python -m op_usage backfill --metadata-only` | Full history **metadata only** (refresh `length_miles`); no qlog downloads |
-| `python -m op_usage backfill --reparse-engaged` | Same as backfill, but clear cached engaged + not-in-park times first (re-download qlogs) |
+| `python -m op_usage backfill --reparse-engaged` | Full history: clear listed routes’ cached qlog fields, re-download qlogs |
 | `python -m op_usage nightly` | Incremental + 24h recheck, write HTML |
-| `python -m op_usage nightly --reparse-engaged` | Incremental listing, but reparse every listed route’s qlogs (engaged + not-in-park) |
+| `python -m op_usage nightly --reparse-engaged` | Same window as nightly; reparse **listed** routes only (does not wipe older cache rows) |
 | `python -m op_usage generate` | HTML from sqlite only |
 | `python -m op_usage deploy` | `wrangler pages deploy` |
 | `python -m op_usage deploy --dry-run` | Print the wrangler command |
 
-## Next steps (owner)
+## Owner checklist
 
-1. Put **JWT + dongle_id** in `~/.config/op-usage/credentials.env`.
+1. JWT + dongle_id in `~/.config/op-usage/credentials.env`. A **401** means mint a new token at jwt.comma.ai — there is no refresh flow.
 2. `pip install -e ".[dev]"` and `python -m op_usage demo` to confirm the page.
-3. `python -m op_usage backfill -v` on the Debian box (leave it running; qlog downloads are throttled).
-4. Create the Cloudflare Pages project, `wrangler login`, `./scripts/deploy.sh`.
-5. Install the cron example. Share the Pages URL, not this repo.
+3. First live load (or after a parser change): `python -m op_usage backfill -v` (add `--reparse-engaged` when cached qlog fields are wrong). Qlog downloads are throttled (5/min files API).
+4. Cloudflare Pages project + `./scripts/deploy.sh`. Public site: `op-stats.keenin.com`.
+5. Cron example → `scripts/nightly.sh` (incremental fetch + deploy). Share the Pages URL, not this repo.
 
 ## Out of scope (v1)
 

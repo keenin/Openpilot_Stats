@@ -15,9 +15,14 @@ from op_usage.pipeline import generate_from_cache, run_demo, run_pipeline
 
 
 def main(argv: list[str] | None = None) -> int:
+    raw = list(sys.argv[1:] if argv is None else argv)
+    raw, verbose = _strip_verbose(raw)
     parser = argparse.ArgumentParser(
         prog="op-usage",
-        description="Personal openpilot usage site (private pipeline → static HTML).",
+        description=(
+            "Personal openpilot usage site (private pipeline → static HTML). "
+            "-v/--verbose works before or after the subcommand."
+        ),
     )
     parser.add_argument("-v", "--verbose", action="store_true")
     shared = argparse.ArgumentParser(add_help=False)
@@ -30,9 +35,10 @@ def main(argv: list[str] | None = None) -> int:
         "--reparse-engaged",
         action="store_true",
         help=(
-            "Clear cached qlog parses (engaged_time_s, not_in_park_time_s, "
-            "including engaged_time_s=0) and re-read qlogs. Required after the "
-            "not-in-park engage percent change so the denominator is recomputed."
+            "Clear cached qlog parses for routes this run will list "
+            "(engaged_time_s, not_in_park_time_s, including zeros) and re-read "
+            "those qlogs. Does not wipe routes outside the fetch window. "
+            "After an interrupted run, resume with plain backfill/nightly."
         ),
     )
     reparse.add_argument(
@@ -67,11 +73,11 @@ def main(argv: list[str] | None = None) -> int:
     dep = sub.add_parser("deploy", parents=[shared], help="wrangler pages deploy ./site")
     dep.add_argument("--dry-run", action="store_true")
 
-    args = parser.parse_args(argv)
+    args = parser.parse_args(raw)
     if getattr(args, "metadata_only", False) and getattr(args, "reparse_engaged", False):
         parser.error("--metadata-only cannot be combined with --reparse-engaged")
     logging.basicConfig(
-        level=logging.DEBUG if args.verbose else logging.INFO,
+        level=logging.DEBUG if (verbose or args.verbose) else logging.INFO,
         format="%(asctime)s %(levelname)s %(message)s",
     )
     settings = load_settings()
@@ -116,6 +122,18 @@ def main(argv: list[str] | None = None) -> int:
         return _deploy(settings, dry_run=args.dry_run)
     parser.error("unknown command")
     return 2
+
+
+def _strip_verbose(argv: list[str]) -> tuple[list[str], bool]:
+    """Allow `op-usage -v backfill` and `op-usage backfill -v` (argparse only does one)."""
+    verbose = False
+    kept: list[str] = []
+    for arg in argv:
+        if arg in ("-v", "--verbose"):
+            verbose = True
+        else:
+            kept.append(arg)
+    return kept, verbose
 
 
 def _with_overrides(settings, out: Path | None, cache: Path | None):
