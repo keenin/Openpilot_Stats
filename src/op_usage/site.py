@@ -121,7 +121,7 @@ def _commit_block(commit: CommitRow, tz: ZoneInfo) -> str:
         <td colspan="7">
           <table class="nested">
             <thead>
-              <tr><th>Drive</th><th>Miles</th><th>Engage %</th></tr>
+              <tr><th>Drive</th><th>Miles</th><th title="engaged time / time not in Park">Engage %</th></tr>
             </thead>
             <tbody>
               {nested}
@@ -252,7 +252,7 @@ _PAGE = """<!DOCTYPE html>
           <th>Drives</th>
           <th>Miles</th>
           <th>Engaged time</th>
-          <th>Engage %</th>
+          <th title="engaged time / time not in Park">Engage %</th>
         </tr>
       </thead>
       {rows}

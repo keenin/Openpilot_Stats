@@ -65,6 +65,11 @@ def load_fixture_drives(path: Path) -> list[DriveRow]:
                 engaged_time_s=float(item["engaged_time_s"]),
                 engaged_source=item.get("engaged_source", "selfdriveState.enabled"),
                 qlog_parsed=True,
+                not_in_park_time_s=(
+                    None
+                    if item.get("not_in_park_time_s") is None
+                    else float(item["not_in_park_time_s"])
+                ),
             )
         )
     return drives
@@ -113,8 +118,9 @@ def run_pipeline(
         cache.set_meta("dongle_id", settings.dongle_id or "")
         if cache.schema_upgraded_from:
             log.warning(
-                "cache schema_version %s → %s; cached engaged_time_s=0 rows will not "
-                "reparse unless you pass --reparse-engaged (or SQL-clear qlog_parsed)",
+                "cache schema_version %s → %s; cached qlog rows will not "
+                "reparse unless you pass --reparse-engaged (or SQL-clear qlog_parsed). "
+                "Engage %% needs not_in_park_time_s from a reparse.",
                 cache.schema_upgraded_from,
                 SCHEMA_VERSION,
             )
@@ -177,14 +183,26 @@ def run_pipeline(
                     urls = client.route_qlog_urls(meta.route_name)
                     blobs = [client.download_bytes(u) for u in urls]
                     result = extract_engaged_time_from_qlogs(blobs, event_mod=event_mod)
-                    cache.save_engaged(meta.route_name, result.engaged_time_s, result.source)
-                    stats.qlogs_parsed += 1
-                    log.info(
-                        "  %s engaged=%.1fs source=%s samples=%d",
+                    # No carState samples: keep a denominator (API wall-clock).
+                    not_in_park = result.not_in_park_time_s
+                    if not_in_park is None:
+                        not_in_park = row.total_drive_time_s
+                    cache.save_engaged(
                         meta.route_name,
                         result.engaged_time_s,
                         result.source,
+                        not_in_park,
+                    )
+                    stats.qlogs_parsed += 1
+                    log.info(
+                        "  %s engaged=%.1fs not_in_park=%.1fs source=%s "
+                        "samples=%d gear_samples=%d",
+                        meta.route_name,
+                        result.engaged_time_s,
+                        not_in_park,
+                        result.source,
                         result.sample_count,
+                        result.gear_sample_count,
                     )
                 except Exception as exc:
                     log.warning("qlog parse failed for %s: %s", meta.route_name, exc)
@@ -225,8 +243,9 @@ def _ts_ms(item: dict, ms_key: str, iso_key: str) -> int:
 
 
 def _meta_to_row(meta: RouteMeta) -> DriveRow:
-    # Wall-clock route duration, same window connect uses (segment start/end
-    # times, stored there as milliseconds). Engage % = engaged / this.
+    # API wall-clock route duration (segment start/end). Stored as
+    # total_drive_time_s for diagnostics / fallback. Engage % uses
+    # not_in_park_time_s from the qlog parse, not this value.
     duration = max(0.0, (meta.end_time_utc_ms - meta.start_time_utc_ms) / 1000.0)
     return DriveRow(
         route_name=meta.route_name,

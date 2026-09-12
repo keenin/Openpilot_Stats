@@ -10,8 +10,8 @@ The public artifact is a **static `index.html`**. The browser never talks to com
 Debian box (cron 03:00 PT)
   ├─ JWT + dongle_id from ~/.config/op-usage/credentials.env   # never in git
   ├─ GET comma API route metadata (git_commit, miles, times)
-  ├─ GET /v1/route/{name}/files → qlogs → engaged time
-  ├─ SQLite cache (watermark + per-route engaged time)
+  ├─ GET /v1/route/{name}/files → qlogs → engaged time + not-in-park time
+  ├─ SQLite cache (watermark + per-route engaged / not-in-park time)
   └─ write site/index.html → wrangler pages deploy
 ```
 
@@ -21,7 +21,7 @@ Debian box (cron 03:00 PT)
 
 **Sort** commits by date of the **last** qualifying drive, newest first. The main table is not sorted by engage %.
 
-**Engage %** = `engaged_time / total_drive_time` (wall-clock route duration from API start/end timestamps). Same formula for a commit (sums) and for a drill-down drive.
+**Engage %** = `engaged_time / not_in_park_time` (qlog integral of time the car is **not in Park**). Same formula for a commit (sums) and for a drill-down drive. Parked idling does not inflate the denominator. API wall-clock `total_drive_time_s` is stored for diagnostics / fallback only.
 
 Click the drive **count** to expand that commit (date, miles, engage %). The main view does not list every drive.
 
@@ -36,21 +36,40 @@ The bundled Cap’n Proto stub must keep **`Event.valid @67` outside the union**
 
 Integration uses `logMonoTime` deltas, not sample counts. Gaps > 5s are skipped so a missing segment is not counted as engaged.
 
-Per-route engaged time is **cached**. Old logs are not re-parsed. Nightly re-checks the last 24h in case uploads are still in flight (`maxqlog` grew).
+Per-route engaged time and not-in-park time are **cached**. Old logs are not re-parsed. Nightly re-checks the last 24h in case uploads are still in flight (`maxqlog` grew).
 
-### Reparse cached zeros (required once after the schema fix)
+### Not-in-park time (engage % denominator)
 
-Routes already stored with `qlog_parsed=1` and `engaged_time_s=0` are skipped forever. After upgrading, **invalidate and re-read**:
+`not_in_park_time_s` is the integral of **`carState.gearShifter != park`**, same gap rules as engaged time.
+
+Verified against upstream cereal (commaai/openpilot `log.capnp` + commaai/opendbc `car.capnp`, 2026-09):
+
+| Field | Ordinal | Notes |
+|-------|---------|--------|
+| `Event.carState` | `@22` | `Car.CarState` |
+| `CarState.gearShifter` | `@14` | enum `GearShifter` |
+| `GearShifter.park` | `@1` | `unknown @0`, `drive @2`, `neutral @3`, `reverse @4`, `sport @5`, `low @6`, `brake @7`, `eco @8`, `manumatic @9` |
+
+Only **`park`** is excluded. `unknown` and every other gear count as not-in-park. `CarState.parkingBrake` (`@39`) is the parking-brake switch — a different signal — and is not used.
+
+If a qlog has no `carState` samples, the cached denominator falls back to API wall-clock `total_drive_time_s`.
+
+### Reparse cached qlogs (required after parser or timing-field changes)
+
+Routes already stored with `qlog_parsed=1` are skipped forever, including rows whose `not_in_park_time_s` is still NULL (pre–not-in-park cache). After upgrading, **invalidate and re-read** so both timing fields are recomputed from qlogs:
 
 ```bash
 python3 -m op_usage backfill -v --reparse-engaged
 ```
 
-`--reparse-engaged` also works on `nightly`. Equivalent SQL on `~/.cache/op-usage/op-usage.sqlite`:
+`--reparse-engaged` also works on `nightly`. It clears `qlog_parsed`, `engaged_time_s`, `engaged_source`, and `not_in_park_time_s`. Equivalent SQL on `~/.cache/op-usage/op-usage.sqlite`:
 
 ```sql
 UPDATE drives
-SET qlog_parsed = 0, engaged_time_s = NULL, engaged_source = NULL;
+SET qlog_parsed = 0,
+    engaged_time_s = NULL,
+    engaged_source = NULL,
+    not_in_park_time_s = NULL;
 ```
 
 Then run `backfill` or `nightly` as usual (without the flag). Do not delete the whole sqlite file unless you also want to redo route listing / the watermark.
@@ -148,7 +167,7 @@ python3 -m op_usage nightly -v      # watermark + last 24h only
 python3 -m op_usage generate        # rebuild HTML from cache, no API
 ```
 
-If a previous run cached `engaged_time_s=0` for every route, add `--reparse-engaged` to `backfill` (see above).
+If a previous run cached `engaged_time_s=0`, or after upgrading to not-in-park engage %, add `--reparse-engaged` to `backfill` (see above).
 
 If engaged times look good but `generate` still writes an empty table, `length_miles` is stale — run `backfill -v --metadata-only` (see “Refresh length_miles”).
 
@@ -185,14 +204,16 @@ meta
   watermark_ms     max start_time of listed routes (incremental cursor)
   last_run_iso
   dongle_id
-    schema_version        bumped to 2 with the Event.valid-@67 stub fix;
-                          does not auto-wipe engaged rows — use --reparse-engaged
+    schema_version        bumped to 3 with not_in_park_time_s;
+                          does not auto-wipe qlog rows — use --reparse-engaged
 
 drives             one row per route
   route_name PK
-  start/end_time_utc_ms, length_miles, total_drive_time_s
+  start/end_time_utc_ms, length_miles
+  total_drive_time_s               # API wall-clock (end-start); fallback only
   git_commit, git_branch, git_remote, maxqlog
   engaged_time_s, engaged_source   # cached; old qlogs not re-read
+  not_in_park_time_s               # qlog gear integral; engage-% denominator
   qlog_parsed                      # 1 once parse succeeded (incl. 0 engaged)
 ```
 
@@ -205,9 +226,9 @@ Nightly fetch window: `watermark - 24h` → now. Recheck last day if `maxqlog` i
 | `python -m op_usage demo` | Fixture drives → HTML, no JWT |
 | `python -m op_usage backfill` | Full history, parse uncached qlogs, write HTML |
 | `python -m op_usage backfill --metadata-only` | Full history **metadata only** (refresh `length_miles`); no qlog downloads |
-| `python -m op_usage backfill --reparse-engaged` | Same as backfill, but clear cached engaged times first (re-download qlogs) |
+| `python -m op_usage backfill --reparse-engaged` | Same as backfill, but clear cached engaged + not-in-park times first (re-download qlogs) |
 | `python -m op_usage nightly` | Incremental + 24h recheck, write HTML |
-| `python -m op_usage nightly --reparse-engaged` | Incremental listing, but reparse every listed route’s qlogs |
+| `python -m op_usage nightly --reparse-engaged` | Incremental listing, but reparse every listed route’s qlogs (engaged + not-in-park) |
 | `python -m op_usage generate` | HTML from sqlite only |
 | `python -m op_usage deploy` | `wrangler pages deploy` |
 | `python -m op_usage deploy --dry-run` | Print the wrangler command |

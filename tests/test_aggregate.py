@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from op_usage.aggregate import aggregate_commits, qualifies
+from op_usage.aggregate import aggregate_commits, denominator_s, qualifies
 from op_usage.cache import DriveRow
 
 
@@ -78,6 +78,32 @@ def test_date_range_and_totals() -> None:
     assert row.engaged_time_s == 60
     assert row.engage_pct == 20.0
     assert row.git_branch == "nightly"
+
+
+def test_engage_pct_uses_not_in_park_not_wall_clock() -> None:
+    """Parked idle must not inflate the engage-% denominator."""
+    group = [
+        drive(
+            route_name=f"p{i}",
+            git_commit="npnp",
+            start_time_utc_ms=1000 + i,
+            engaged_time_s=1800,
+            total_drive_time_s=3600,
+            not_in_park_time_s=2000,
+        )
+        for i in range(3)
+    ]
+    row = aggregate_commits(group)[0]
+    assert row.not_in_park_time_s == 6000
+    assert abs(row.engage_pct - 90.0) < 1e-9
+    assert row.drives[0].engage_pct == 90.0
+
+
+def test_denominator_falls_back_to_wall_clock_before_reparse() -> None:
+    d = drive(not_in_park_time_s=None, total_drive_time_s=3600, engaged_time_s=1800)
+    assert denominator_s(d) == 3600.0
+    d2 = drive(not_in_park_time_s=2000, total_drive_time_s=3600)
+    assert denominator_s(d2) == 2000.0
 
 
 def test_branch_comes_from_last_drive() -> None:

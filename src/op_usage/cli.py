@@ -30,8 +30,9 @@ def main(argv: list[str] | None = None) -> int:
         "--reparse-engaged",
         action="store_true",
         help=(
-            "Clear cached qlog parses (including engaged_time_s=0) and re-read qlogs. "
-            "Needed once after the Event-schema fix so bad zeros are not skipped."
+            "Clear cached qlog parses (engaged_time_s, not_in_park_time_s, "
+            "including engaged_time_s=0) and re-read qlogs. Required after the "
+            "not-in-park engage percent change so the denominator is recomputed."
         ),
     )
     reparse.add_argument(

@@ -18,7 +18,7 @@ def test_demo_cli_writes_index(tmp_path) -> None:
     assert "<h1" not in html
     assert "Demo data" not in html
     assert "Updated " in html
-    assert "<th>Engage %</th>" in html
+    assert "Engage %" in html
 
 
 def test_reparse_engaged_flag_is_documented(capsys) -> None:
@@ -28,6 +28,7 @@ def test_reparse_engaged_flag_is_documented(capsys) -> None:
         assert exc.code == 0
     out = capsys.readouterr().out
     assert "--reparse-engaged" in out
+    assert "not_in_park_time_s" in out
     assert "--metadata-only" in out
 
 

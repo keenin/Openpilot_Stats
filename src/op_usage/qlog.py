@@ -1,4 +1,4 @@
-"""Engaged-time extraction from openpilot qlogs.
+"""Engaged-time and not-in-park-time extraction from openpilot qlogs.
 
 Access path (live):
   1. GET /v1/route/{routeName}/files  → payload["qlogs"] signed URLs
@@ -6,13 +6,17 @@ Access path (live):
   3. Decompress bz2 or zstd (magic-byte detect, same as openpilot LogReader)
   4. Parse concatenated Cap'n Proto Event messages
 
-Field used:
+Fields used:
   Prefer  selfdriveState.enabled   (openpilot ~0.9.7+, Event union @130)
   Fallback controlsState.enabled   (older logs; cereal field @19, now under
                                     ControlsState.deprecated.enabled)
+  Park    carState.gearShifter     (Event union @22, CarState field @14)
+            cereal GearShifter.park @1 (opendbc car.capnp). Only `park` is
+            excluded from the engage-% denominator; unknown and every other
+            gear count as not-in-park. parkingBrake is a different signal.
 
-Engage time is the integral of enabled over logMonoTime (nanoseconds), not a
-sample count. Gaps larger than MAX_GAP_S are skipped (segment holes / dropout).
+Engage time and not-in-park time are integrals over logMonoTime (nanoseconds),
+not sample counts. Gaps larger than MAX_GAP_S are skipped (segment holes).
 
 If an openpilot checkout is on OPENPILOT_PATH, cereal.log.Event is used.
 Otherwise the bundled stub schema (schemas/engaged.capnp) is used. The stub
@@ -38,7 +42,12 @@ NS = 1_000_000_000.0
 
 SELFDRIVE_SOURCE = "selfdriveState.enabled"
 CONTROLS_SOURCE = "controlsState.enabled"
+GEAR_SOURCE = "carState.gearShifter"
 NONE_SOURCE = "none"
+
+# cereal / opendbc CarState.GearShifter.park @1 (unknown @0, drive @2, …).
+PARK_GEAR_RAW = 1
+PARK_GEAR_NAMES = frozenset({"park"})
 
 
 @dataclass(frozen=True)
@@ -53,6 +62,9 @@ class EngagedResult:
     engaged_time_s: float
     source: str
     sample_count: int
+    not_in_park_time_s: float | None = None
+    gear_sample_count: int = 0
+    gear_source: str = NONE_SOURCE
 
 
 def decompress_qlog(data: bytes) -> bytes:
@@ -99,12 +111,7 @@ def extract_engaged_time(qlog_bytes: bytes, event_mod: Any | None = None) -> Eng
     if event_mod is None:
         event_mod = load_event_module()
     samples = list(_iter_samples(decompressed, event_mod))
-    chosen, source = pick_source(samples)
-    return EngagedResult(
-        engaged_time_s=engaged_seconds(chosen),
-        source=source,
-        sample_count=len(chosen),
-    )
+    return _result_from_samples(samples)
 
 
 def extract_engaged_time_from_qlogs(blobs: Iterable[bytes], event_mod: Any | None = None) -> EngagedResult:
@@ -115,11 +122,19 @@ def extract_engaged_time_from_qlogs(blobs: Iterable[bytes], event_mod: Any | Non
     for blob in blobs:
         decompressed = decompress_qlog(blob)
         samples.extend(_iter_samples(decompressed, event_mod))
+    return _result_from_samples(samples)
+
+
+def _result_from_samples(samples: list[EnabledSample]) -> EngagedResult:
     chosen, source = pick_source(samples)
+    gear = [s for s in samples if s.source == GEAR_SOURCE]
     return EngagedResult(
         engaged_time_s=engaged_seconds(chosen),
         source=source,
         sample_count=len(chosen),
+        not_in_park_time_s=engaged_seconds(gear) if gear else None,
+        gear_sample_count=len(gear),
+        gear_source=GEAR_SOURCE if gear else NONE_SOURCE,
     )
 
 
@@ -132,7 +147,8 @@ def load_event_module(openpilot_path: Path | None = None, cereal_path: Path | No
     stub = _load_stub_schema()
     log.info(
         "qlog parser: using bundled stub schema "
-        "(Event.valid @67, selfdriveState @130, controlsState.enabled @19)"
+        "(Event.valid @67, selfdriveState @130, controlsState.enabled @19, "
+        "carState.gearShifter @22/@14 park@1)"
     )
     return stub
 
@@ -179,40 +195,47 @@ def _iter_samples(decompressed: bytes, event_cls: Any) -> Iterator[EnabledSample
         return
     try:
         for event in events:
-            sample = _event_to_sample(event)
-            if sample is not None:
+            for sample in _event_to_samples(event):
                 yield sample
     except Exception as exc:
         # Trailing corruption is common in truncated uploads.
         log.warning("stopped reading qlog events early: %s", exc)
 
 
-def _event_to_sample(event: Any) -> EnabledSample | None:
+def _event_to_samples(event: Any) -> list[EnabledSample]:
     try:
         which = event.which()
     except Exception:
-        return None
+        return []
     try:
         mono = int(event.logMonoTime)
     except Exception:
-        return None
+        return []
     if which == "selfdriveState":
         try:
             enabled = _read_enabled(event.selfdriveState)
         except Exception:
-            return None
+            return []
         if enabled is None:
-            return None
-        return EnabledSample(mono, enabled, SELFDRIVE_SOURCE)
+            return []
+        return [EnabledSample(mono, enabled, SELFDRIVE_SOURCE)]
     if which == "controlsState":
         try:
             enabled = _read_enabled(event.controlsState)
         except Exception:
-            return None
+            return []
         if enabled is None:
-            return None
-        return EnabledSample(mono, enabled, CONTROLS_SOURCE)
-    return None
+            return []
+        return [EnabledSample(mono, enabled, CONTROLS_SOURCE)]
+    if which == "carState":
+        try:
+            not_in_park = _read_not_in_park(event.carState)
+        except Exception:
+            return []
+        if not_in_park is None:
+            return []
+        return [EnabledSample(mono, not_in_park, GEAR_SOURCE)]
+    return []
 
 
 def _read_enabled(obj: Any) -> bool | None:
@@ -225,6 +248,34 @@ def _read_enabled(obj: Any) -> bool | None:
         return bool(obj.deprecated.enabled)
     except Exception:
         return None
+
+
+def _read_not_in_park(car_state: Any) -> bool | None:
+    """True when gearShifter is not park. None if the field cannot be read."""
+    try:
+        gear = car_state.gearShifter
+    except Exception:
+        return None
+    if _gear_is_park(gear):
+        return False
+    return True
+
+
+def _gear_is_park(gear: Any) -> bool:
+    """Match cereal GearShifter.park by raw ordinal (@1) or enum name."""
+    raw = getattr(gear, "raw", None)
+    if raw is not None:
+        try:
+            return int(raw) == PARK_GEAR_RAW
+        except (TypeError, ValueError):
+            pass
+    text = str(gear).rsplit(".", 1)[-1].strip().lower()
+    if text in PARK_GEAR_NAMES:
+        return True
+    try:
+        return int(text) == PARK_GEAR_RAW
+    except (TypeError, ValueError):
+        return False
 
 
 def encode_synthetic_qlog(
@@ -242,6 +293,9 @@ def encode_synthetic_qlog(
         if sample.source == CONTROLS_SOURCE:
             cs = msg.init("controlsState")
             cs.enabled = sample.enabled
+        elif sample.source == GEAR_SOURCE:
+            car = msg.init("carState")
+            car.gearShifter = "drive" if sample.enabled else "park"
         else:
             ss = msg.init("selfdriveState")
             ss.enabled = sample.enabled
