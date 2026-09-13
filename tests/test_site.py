@@ -53,6 +53,7 @@ def test_demo_html_lists_only_qualified_commits_newest_first() -> None:
     assert "Updated 2026-09-11 03:00 PDT" in html
     for blob in CHROME:
         assert blob not in html
+    assert "<title>Openpilot Stats</title>" in html
     assert "<h1" not in html
     assert "banner" not in html
     assert "<header" not in html
