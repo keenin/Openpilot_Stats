@@ -82,3 +82,89 @@ def test_denominator_falls_back_to_wall_clock_before_reparse() -> None:
     d = drive_row(not_in_park_time_s=None, total_drive_time_s=3600, engaged_time_s=1800)
     assert denominator_s(d) == 3600.0
     assert denominator_s(drive_row(not_in_park_time_s=2000, total_drive_time_s=3600)) == 2000.0
+
+
+REMOTE = "git@github.com:commaai/openpilot.git"
+
+
+def _master(commit: str, n: int, t0: int, **kwargs):
+    return [
+        drive_row(
+            route_name=f"{commit}-{i}",
+            git_commit=commit,
+            git_branch="master",
+            git_remote=REMOTE,
+            start_time_utc_ms=t0 + i,
+            **kwargs,
+        )
+        for i in range(n)
+    ]
+
+
+def test_non_master_stays_one_row_per_sha_even_with_lookup() -> None:
+    """Nightly/other branches ignore weights fingerprints."""
+    fps = {
+        "aaa1111111111111111111111111111111111111": "same",
+        "bbb2222222222222222222222222222222222222": "same",
+    }
+    a = [
+        drive_row(
+            route_name=f"n{i}",
+            git_commit="aaa1111111111111111111111111111111111111",
+            git_branch="nightly",
+            start_time_utc_ms=1000 + i,
+        )
+        for i in range(3)
+    ]
+    b = [
+        drive_row(
+            route_name=f"m{i}",
+            git_commit="bbb2222222222222222222222222222222222222",
+            git_branch="nightly",
+            start_time_utc_ms=2000 + i,
+        )
+        for i in range(3)
+    ]
+    rows = aggregate_commits(a + b, weights_lookup=lambda c, r: fps[c.lower()])
+    assert {r.git_commit for r in rows} == {
+        "aaa1111111111111111111111111111111111111",
+        "bbb2222222222222222222222222222222222222",
+    }
+
+
+def test_master_same_weights_merge_and_three_rule_uses_merged_count() -> None:
+    """Two master SHAs with 2+1 qualifying drives list as one era."""
+    a = _master("aaaaaaa111111111111111111111111111111111", 2, 1000)
+    b = _master("bbbbbbb222222222222222222222222222222222", 1, 2000)
+    fps = {d.git_commit: "era-1" for d in a + b}
+    rows = aggregate_commits(a + b, weights_lookup=lambda c, r: fps[c])
+    assert len(rows) == 1
+    assert rows[0].drive_count == 3
+    assert rows[0].git_branch == "master"
+    assert rows[0].git_commit.startswith("bbbbbbb")
+    assert rows[0].era_first_commit.startswith("aaaaaaa")
+    assert rows[0].short_hash == "aaaaaaa…bbbbbbb"
+    assert rows[0].last_drive_ms == 2000
+
+
+def test_master_weights_change_starts_new_group() -> None:
+    old = _master("ccccccc111111111111111111111111111111111", 3, 1000)
+    new = _master("ddddddd222222222222222222222222222222222", 3, 5000)
+    fps = {d.git_commit: ("old" if d.git_commit.startswith("c") else "new") for d in old + new}
+    rows = aggregate_commits(old + new, weights_lookup=lambda c, r: fps[c])
+    assert [r.git_commit[:7] for r in rows] == ["ddddddd", "ccccccc"]
+    assert [r.drive_count for r in rows] == [3, 3]
+
+
+def test_master_merged_group_still_requires_three() -> None:
+    a = _master("eeeeeee111111111111111111111111111111111", 1, 1000)
+    b = _master("fffffff222222222222222222222222222222222", 1, 2000)
+    rows = aggregate_commits(a + b, weights_lookup=lambda c, r: "same")
+    assert rows == []
+
+
+def test_master_unknown_fingerprint_does_not_merge() -> None:
+    a = _master("1111111111111111111111111111111111111111", 2, 1000)
+    b = _master("2222222222222222222222222222222222222222", 1, 2000)
+    rows = aggregate_commits(a + b, weights_lookup=lambda c, r: None)
+    assert rows == []

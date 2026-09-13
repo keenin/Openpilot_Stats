@@ -41,6 +41,14 @@ CREATE TABLE IF NOT EXISTS drives (
 
 CREATE INDEX IF NOT EXISTS idx_drives_commit ON drives(git_commit);
 CREATE INDEX IF NOT EXISTS idx_drives_start ON drives(start_time_utc_ms);
+
+CREATE TABLE IF NOT EXISTS commit_weights (
+  repo TEXT NOT NULL,
+  git_commit TEXT NOT NULL,
+  fingerprint TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY (repo, git_commit)
+);
 """
 
 
@@ -192,6 +200,25 @@ class Cache:
         for drive in drives:
             self._conn.execute(_DRIVE_INSERT_SQL, _drive_values(drive, qlog_parsed=1))
         self._conn.commit()
+
+    def get_commit_weights(self, repo: str, git_commit: str) -> str | None:
+        row = self._conn.execute(
+            "SELECT fingerprint FROM commit_weights WHERE repo = ? AND git_commit = ?",
+            (repo, git_commit.lower()),
+        ).fetchone()
+        return None if row is None else str(row["fingerprint"])
+
+    def set_commit_weights(self, repo: str, git_commit: str, fingerprint: str) -> None:
+        self._conn.execute(
+            """
+            INSERT INTO commit_weights(repo, git_commit, fingerprint, updated_at)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(repo, git_commit) DO UPDATE SET
+              fingerprint = excluded.fingerprint,
+              updated_at = excluded.updated_at
+            """,
+            (repo, git_commit.lower(), fingerprint, _now()),
+        )
 
     def commit(self) -> None:
         self._conn.commit()

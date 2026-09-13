@@ -14,11 +14,13 @@ Debian box (cron 03:00 PT)
 ```
 
 - **Include a drive** only if length ≥ 1 mile **and** engaged time > 0.
-- **List a commit** only if it has ≥ 3 qualifying drives.
+- **List a group** only if it has ≥ 3 qualifying drives.
+- **Other branches:** one row per git SHA.
+- **`master` only:** consecutive SHAs that share the same driving-model weights are one row. Weights are the blob SHAs of driving ONNX/pkl files under `selfdrive/modeld/models` (or `openpilot/selfdrive/modeld/models`); resolved via the GitHub contents API from each drive’s `git_commit` + `git_remote`, then cached in sqlite. UI / cars / CI commits do not split the group — only a weights change does. The Commit cell is the last SHA in the era (tooltip: first … last) so you can map it back to openpilot history. Optional `GITHUB_TOKEN` in credentials.env raises the GitHub rate limit; without it, unknown SHAs stay one-row-per-SHA.
 - **Sort** by date of the last qualifying drive, newest first (not by engage %).
-- **Engage %** = `engaged_time / not_in_park_time` (qlog time the car is **not in Park**). Same formula for a commit (sums) and a drill-down drive. API `total_drive_time_s` is fallback / diagnostics only.
+- **Engage %** = `engaged_time / not_in_park_time` (qlog time the car is **not in Park**). Same formula for a group (sums) and a drill-down drive. API `total_drive_time_s` is fallback / diagnostics only. Miles come from API `distance`.
 
-Click the drive **count** to expand that commit (date, miles, engage %). The main view does not list every drive.
+Click the drive **count** to expand that group (date, miles, engage %). The main view does not list every drive.
 
 **Engaged time** is a qlog integral of `logMonoTime` deltas (gaps > 5s skipped): prefer `selfdriveState.enabled` (`Event` `@130`); if that message is absent, `controlsState.enabled` (`@19`, including cereal’s `deprecated.enabled`). The bundled Cap’n Proto stub must keep `Event.valid @67` *outside* the union.
 
