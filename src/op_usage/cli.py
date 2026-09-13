@@ -7,6 +7,7 @@ import logging
 import os
 import subprocess
 import sys
+import tempfile
 from dataclasses import replace
 from pathlib import Path
 
@@ -59,6 +60,10 @@ def main(argv: list[str] | None = None) -> int:
         default=_default_fixture(),
         help="JSON list of drives",
     )
+    demo.epilog = (
+        "Omitting --cache/--out writes to temp paths. Demo refuses the live "
+        "default cache (~/.cache/op-usage/op-usage.sqlite) and ./site."
+    )
 
     sub.add_parser(
         "backfill",
@@ -85,6 +90,7 @@ def main(argv: list[str] | None = None) -> int:
     settings = _with_overrides(settings, args.out, args.cache)
 
     if args.cmd == "demo":
+        settings = _demo_settings(settings, args.out, args.cache)
         stats = run_demo(settings, args.fixture)
         print(f"demo site → {stats.html_path}")
         return 0
@@ -128,6 +134,16 @@ def _strip_verbose(argv: list[str]) -> tuple[list[str], bool]:
         else:
             kept.append(arg)
     return kept, verbose
+
+
+def _demo_settings(settings, out: Path | None, cache: Path | None):
+    """Point demo at temp paths unless the caller overrode cache/site."""
+    updates = {}
+    if cache is None:
+        updates["cache_path"] = Path(tempfile.mkdtemp(prefix="op-usage-demo-")) / "demo.sqlite"
+    if out is None:
+        updates["site_dir"] = Path(tempfile.mkdtemp(prefix="op-usage-demo-site-"))
+    return replace(settings, **updates) if updates else settings
 
 
 def _with_overrides(settings, out: Path | None, cache: Path | None):

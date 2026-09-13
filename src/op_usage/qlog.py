@@ -119,14 +119,29 @@ def extract_engaged_time_from_qlogs(blobs: Iterable[bytes], event_mod: Any | Non
     return _result_from_samples(samples)
 
 
+def _usable_not_in_park_s(gear: list[EnabledSample], engaged_time_s: float) -> float | None:
+    """Gear integral, or None when it is not a usable denominator.
+
+    Fewer than two samples cannot integrate. 0.0 while engaged_time_s > 0
+    is also unusable (always-park, or a degenerate integral).
+    """
+    if len(gear) < 2:
+        return None
+    value = engaged_seconds(gear)
+    if value == 0.0 and engaged_time_s > 0:
+        return None
+    return value
+
+
 def _result_from_samples(samples: list[EnabledSample]) -> EngagedResult:
     chosen, source = pick_source(samples)
     gear = [s for s in samples if s.source == GEAR_SOURCE]
+    engaged = engaged_seconds(chosen)
     return EngagedResult(
-        engaged_time_s=engaged_seconds(chosen),
+        engaged_time_s=engaged,
         source=source,
         sample_count=len(chosen),
-        not_in_park_time_s=engaged_seconds(gear) if gear else None,
+        not_in_park_time_s=_usable_not_in_park_s(gear, engaged),
         gear_sample_count=len(gear),
         gear_source=GEAR_SOURCE if gear else NONE_SOURCE,
     )

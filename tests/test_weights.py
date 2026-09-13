@@ -52,7 +52,7 @@ def test_fingerprint_ignores_dmonitoring_and_docs() -> None:
     assert fingerprint_from_contents([{"type": "file", "name": "README.md", "sha": "r1"}]) is None
 
 
-def test_github_client_tries_current_then_legacy_path() -> None:
+def test_github_client_tries_live_then_legacy_path() -> None:
     class _Resp:
         def __init__(self, status: int, payload):
             self.status_code = status
@@ -68,7 +68,8 @@ def test_github_client_tries_current_then_legacy_path() -> None:
 
         def get(self, url, headers=None, params=None, timeout=None):
             self.urls.append(url)
-            if "openpilot/selfdrive" in url:
+            live = url.endswith("selfdrive/modeld/models") and "openpilot/selfdrive" not in url
+            if live:
                 return _Resp(404, {"message": "Not Found"})
             return _Resp(
                 200,
@@ -79,8 +80,9 @@ def test_github_client_tries_current_then_legacy_path() -> None:
     client = GitHubWeightsClient(token=None, session=sess)
     fp = client.fingerprint("commaai/openpilot", "deadbeef")
     assert fp
+    assert "selfdrive/modeld/models" in sess.urls[0]
+    assert "openpilot/selfdrive" not in sess.urls[0]
     assert any("openpilot/selfdrive/modeld/models" in u for u in sess.urls)
-    assert any(u.endswith("selfdrive/modeld/models") and "openpilot/selfdrive" not in u for u in sess.urls)
 
 
 def test_weights_cache_skips_network(tmp_path) -> None:
@@ -93,6 +95,25 @@ def test_weights_cache_skips_network(tmp_path) -> None:
         cache.commit()
         lookup = make_weights_lookup(cache, client=_Boom())
         assert lookup("ABC", "git@github.com:commaai/openpilot.git") == "fp-1"
+
+
+def test_weights_cache_persists_negative_miss(tmp_path) -> None:
+    class _Miss:
+        disabled = False
+        calls = 0
+
+        def fingerprint(self, repo, sha):
+            self.calls += 1
+            return None
+
+    miss = _Miss()
+    with Cache(tmp_path / "c.sqlite") as cache:
+        lookup = make_weights_lookup(cache, client=miss)
+        assert lookup("abc", "git@github.com:commaai/openpilot.git") is None
+        assert miss.calls == 1
+        again = make_weights_lookup(cache, client=miss)
+        assert again("abc", "git@github.com:commaai/openpilot.git") is None
+        assert miss.calls == 1
 
 
 def test_generate_merges_master_via_lookup(tmp_path, monkeypatch) -> None:

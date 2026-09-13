@@ -1,9 +1,10 @@
 """Map a git SHA to a driving-model weights fingerprint (GitHub, cached).
 
 Used only for branch `master`. A fingerprint is the sorted blob SHAs of
-driving weight files under selfdrive/modeld/models (current or pre-move
-path). dmonitoring / docs / code do not count. Nightly caches hits in
-sqlite so repeat generates do not hammer GitHub.
+driving weight files under selfdrive/modeld/models (live tree first,
+then the pre-move openpilot/ prefix). dmonitoring / docs / code do not
+count. Nightly caches hits and confirmed misses in sqlite so repeat
+generates do not hammer GitHub.
 """
 
 from __future__ import annotations
@@ -23,9 +24,10 @@ log = logging.getLogger(__name__)
 DEFAULT_REPO = "commaai/openpilot"
 GITHUB_API = "https://api.github.com"
 MODELS_DIRS = (
-    "openpilot/selfdrive/modeld/models",
     "selfdrive/modeld/models",
+    "openpilot/selfdrive/modeld/models",
 )
+MISSING_WEIGHTS = "-"
 _WEIGHT_SUFFIX = re.compile(r"\.(onnx|pkl|thneed|dlc|chunkmanifest)$", re.I)
 _SSH = re.compile(r"^git@github\.com:(.+?)(?:\.git)?$")
 _HTTPS = re.compile(r"^https://github\.com/(.+?)(?:\.git)?$")
@@ -77,6 +79,10 @@ class GitHubWeightsClient:
         self._session = session or requests.Session()
         self.timeout_s = timeout_s
         self._disabled = False
+
+    @property
+    def disabled(self) -> bool:
+        return self._disabled
 
     def fingerprint(self, repo: str, sha: str) -> str | None:
         if self._disabled or not repo or not sha:
@@ -134,7 +140,7 @@ def make_weights_lookup(
     *,
     client: GitHubWeightsClient | None = None,
 ) -> WeightsLookup:
-    """SHA → fingerprint. Cache hits skip the network; misses are stored."""
+    """SHA → fingerprint. Cache hits (including confirmed misses) skip the network."""
     memo: dict[str, str | None] = {}
     gh = client
 
@@ -146,15 +152,19 @@ def make_weights_lookup(
             return memo[key]
         repo = github_repo_from_remote(remote)
         cached = cache.get_commit_weights(repo, key)
-        if cached:
-            memo[key] = cached
-            return cached
+        if cached is not None:
+            found = None if cached == MISSING_WEIGHTS else cached
+            memo[key] = found
+            return found
         nonlocal gh
         if gh is None:
             gh = GitHubWeightsClient()
         found = gh.fingerprint(repo, commit)
         if found:
             cache.set_commit_weights(repo, key, found)
+            cache.commit()
+        elif not gh.disabled:
+            cache.set_commit_weights(repo, key, MISSING_WEIGHTS)
             cache.commit()
         memo[key] = found
         return found

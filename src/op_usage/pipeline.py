@@ -15,7 +15,7 @@ from pathlib import Path
 from op_usage.aggregate import aggregate_commits
 from op_usage.cache import SCHEMA_VERSION, Cache, DriveRow
 from op_usage.comma_api import CommaClient, RouteMeta, iter_time_chunks, normalize_routes
-from op_usage.config import Settings
+from op_usage.config import Settings, is_live_cache_path, is_live_site_dir
 from op_usage.qlog import extract_engaged_time_from_qlogs, load_event_module
 from op_usage.site import render_site, write_site
 from op_usage.weights import make_weights_lookup
@@ -76,7 +76,24 @@ def load_fixture_drives(path: Path) -> list[DriveRow]:
     return drives
 
 
+def refuse_demo_on_live_paths(settings: Settings) -> None:
+    """Demo does a full DELETE FROM drives — never point it at live paths."""
+    if is_live_cache_path(settings.cache_path):
+        raise SystemExit(
+            "demo refuses to use the live cache "
+            f"({settings.cache_path}). Pass --cache /tmp/op-usage-demo.sqlite "
+            "(or omit --cache to use a temp file)."
+        )
+    if is_live_site_dir(settings.site_dir):
+        raise SystemExit(
+            "demo refuses to overwrite the live site "
+            f"({settings.site_dir}). Pass --out /tmp/op-usage-demo-site "
+            "(or omit --out to use a temp directory)."
+        )
+
+
 def run_demo(settings: Settings, fixture_path: Path) -> RunStats:
+    refuse_demo_on_live_paths(settings)
     with Cache(settings.cache_path) as cache:
         cache.replace_all(load_fixture_drives(fixture_path))
         html_path = generate_from_cache(settings, cache, mode="demo")
@@ -122,7 +139,9 @@ def run_pipeline(
                 cache.schema_upgraded_from,
                 SCHEMA_VERSION,
             )
-        start_ms = _window_start(cache, settings, backfill=backfill)
+        start_ms = _window_start(
+            cache, settings, backfill=backfill, recheck_after_ms=recheck_ms
+        )
         log.info(
             "listing routes %s → now (chunk=%dd, backfill=%s, metadata_only=%s)",
             datetime.fromtimestamp(start_ms / 1000, tz=timezone.utc).date(),
@@ -164,8 +183,10 @@ def run_pipeline(
 
         # Compare incoming maxqlog to the cached row *before* upsert overwrites it.
         need_parse: set[str] = set()
+        listed_names: set[str] = set()
         for meta in listed:
             incoming = _meta_to_row(meta)
+            listed_names.add(meta.route_name)
             if not metadata_only and cache.needs_qlog_parse(incoming, recheck_ms):
                 need_parse.add(meta.route_name)
             cache.upsert_route_meta(incoming)
@@ -181,46 +202,56 @@ def run_pipeline(
             )
             need_parse = {m.route_name for m in listed}
 
+        if not metadata_only:
+            for row in cache.iter_drives():
+                if row.route_name in need_parse:
+                    continue
+                if cache.needs_qlog_parse(row, recheck_ms):
+                    need_parse.add(row.route_name)
+
         cache.commit()
 
         if metadata_only:
             log.info("metadata-only: skipped qlog downloads for %d listed routes", len(listed))
         else:
-            for meta in listed:
-                if meta.route_name not in need_parse:
-                    stats.qlogs_skipped_cached += 1
-                    continue
-                row = cache.get_drive(meta.route_name)
+            stats.qlogs_skipped_cached = sum(
+                1 for name in listed_names if name not in need_parse
+            )
+            for name in need_parse:
+                row = cache.get_drive(name)
                 if row is None:
                     continue
                 try:
-                    urls = client.route_qlog_urls(meta.route_name)
+                    urls = client.route_qlog_urls(name)
                     blobs = [client.download_bytes(u) for u in urls]
                     result = extract_engaged_time_from_qlogs(blobs, event_mod=event_mod)
-                    # No carState samples: keep a denominator (API wall-clock).
-                    not_in_park = result.not_in_park_time_s
-                    if not_in_park is None:
-                        not_in_park = row.total_drive_time_s
+                    # Store None when the gear integral is unusable; denominator_s
+                    # falls back to API wall-clock. Do not write 0.0 as "measured".
                     cache.save_engaged(
-                        meta.route_name,
+                        name,
                         result.engaged_time_s,
                         result.source,
-                        not_in_park,
+                        result.not_in_park_time_s,
                     )
                     cache.commit()
                     stats.qlogs_parsed += 1
+                    park_log = (
+                        result.not_in_park_time_s
+                        if result.not_in_park_time_s is not None
+                        else row.total_drive_time_s
+                    )
                     log.info(
                         "  %s engaged=%.1fs not_in_park=%.1fs source=%s "
                         "samples=%d gear_samples=%d",
-                        meta.route_name,
+                        name,
                         result.engaged_time_s,
-                        not_in_park,
+                        park_log,
                         result.source,
                         result.sample_count,
                         result.gear_sample_count,
                     )
                 except Exception as exc:
-                    log.warning("qlog parse failed for %s: %s", meta.route_name, exc)
+                    log.warning("qlog parse failed for %s: %s", name, exc)
 
         cache.mark_run()
         cache.commit()
@@ -247,12 +278,23 @@ def _dedupe_routes(routes: list[RouteMeta]) -> list[RouteMeta]:
     return list(by_name.values())
 
 
-def _window_start(cache: Cache, settings: Settings, *, backfill: bool) -> int:
+def _window_start(
+    cache: Cache,
+    settings: Settings,
+    *,
+    backfill: bool,
+    recheck_after_ms: int | None = None,
+) -> int:
     watermark = cache.watermark_ms()
     if backfill or watermark == 0:
         start = datetime.fromisoformat(settings.backfill_start).replace(tzinfo=timezone.utc)
         return int(start.timestamp() * 1000)
-    return max(0, watermark - settings.recheck_hours * 3600 * 1000)
+    window = max(0, watermark - settings.recheck_hours * 3600 * 1000)
+    if recheck_after_ms is not None:
+        pending = cache.earliest_recheck_start_ms(recheck_after_ms)
+        if pending is not None:
+            window = min(window, pending)
+    return window
 
 
 def _ts_ms(item: dict, ms_key: str, iso_key: str) -> int:

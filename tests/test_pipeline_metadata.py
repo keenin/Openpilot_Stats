@@ -211,3 +211,110 @@ def test_nightly_reparse_does_not_wipe_unlisted_history(tmp_path, monkeypatch) -
     assert hist.not_in_park_time_s == 50.0
     assert listed is not None and listed.qlog_parsed
     assert listed.engaged_time_s != 1.0
+
+
+def test_nightly_reparses_when_maxqlog_grows_even_if_start_is_old(tmp_path, monkeypatch) -> None:
+    now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+    start_ms = now_ms - 48 * 3_600_000
+    end_ms = start_ms + 3_600_000
+    route = {
+        **ROUTE,
+        "fullname": "deadbeefcafebabe|late-qlogs",
+        "maxqlog": 6,
+        "segment_start_times": [start_ms],
+        "segment_end_times": [end_ms],
+    }
+    fake = _QlogClient([route])
+    monkeypatch.setattr("op_usage.pipeline.CommaClient", lambda **kwargs: fake)
+    settings = _settings(tmp_path)
+    with Cache(settings.cache_path) as cache:
+        _seed(
+            cache,
+            route["fullname"],
+            engaged=99.0,
+            not_in_park=80.0,
+            dongle_id=route["dongle_id"],
+            start_time_utc_ms=start_ms,
+            end_time_utc_ms=end_ms,
+            maxqlog=1,
+        )
+        cache.set_watermark_ms(now_ms)
+        cache.commit()
+
+    stats = run_pipeline(settings, backfill=False)
+    assert fake.qlog_calls == 1
+    assert stats.qlogs_parsed == 1
+    with Cache(settings.cache_path) as cache:
+        row = cache.get_drive(route["fullname"])
+    assert row is not None
+    assert row.maxqlog == 6
+    assert row.engaged_time_s != 99.0
+
+
+def test_nightly_parses_unlisted_unparsed_cached_route(tmp_path, monkeypatch) -> None:
+    fake = _QlogClient([ROUTE])
+    monkeypatch.setattr("op_usage.pipeline.CommaClient", lambda **kwargs: fake)
+    settings = _settings(tmp_path)
+    stranded = "deadbeefcafebabe|stranded-late"
+    with Cache(settings.cache_path) as cache:
+        cache.upsert_route_meta(
+            drive_row(
+                route_name=stranded,
+                dongle_id=ROUTE["dongle_id"],
+                start_time_utc_ms=1_000,
+                end_time_utc_ms=2_000,
+                qlog_parsed=False,
+                engaged_time_s=None,
+            )
+        )
+        cache.set_watermark_ms(int(datetime.now(timezone.utc).timestamp() * 1000))
+        cache.commit()
+
+    stats = run_pipeline(settings, backfill=False)
+    assert stats.qlogs_parsed >= 2
+    assert fake.qlog_calls >= 2
+    with Cache(settings.cache_path) as cache:
+        row = cache.get_drive(stranded)
+    assert row is not None
+    assert row.qlog_parsed
+    assert row.engaged_time_s is not None
+
+
+def test_metadata_only_does_not_blank_good_git_or_miles(tmp_path, monkeypatch) -> None:
+    class _BlankClient(_FakeClient):
+        def list_routes_segments(self, start_ms: int, end_ms: int) -> list[dict]:
+            return [
+                {
+                    **ROUTE,
+                    "distance": 0.0,
+                    "length": 0.0,
+                    "git_commit": "",
+                    "git_branch": "",
+                    "git_remote": "",
+                }
+            ]
+
+    fake = _BlankClient()
+    monkeypatch.setattr("op_usage.pipeline.CommaClient", lambda **kwargs: fake)
+    settings = _settings(tmp_path)
+    with Cache(settings.cache_path) as cache:
+        _seed(
+            cache,
+            ROUTE["fullname"],
+            engaged=12509.5,
+            dongle_id=ROUTE["dongle_id"],
+            length_miles=18.4,
+            git_commit="goodcommit",
+            git_branch="nightly",
+            git_remote="git@github.com:commaai/openpilot.git",
+        )
+        cache.commit()
+
+    run_pipeline(settings, backfill=True, metadata_only=True)
+    with Cache(settings.cache_path) as cache:
+        row = cache.get_drive(ROUTE["fullname"])
+    assert row is not None
+    assert row.length_miles == 18.4
+    assert row.git_commit == "goodcommit"
+    assert row.git_branch == "nightly"
+    assert row.engaged_time_s == 12509.5

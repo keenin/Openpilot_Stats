@@ -1,8 +1,9 @@
 """SQLite cache: per-route metadata, engaged time, incremental watermark.
 
-qlog_parsed=1 rows are not re-read unless they are in the recheck window
-or explicitly cleared. total_drive_time_s is API wall-clock; engage %
-uses not_in_park_time_s after a parse. Schema picture is in the README.
+qlog_parsed=1 rows are not re-read unless maxqlog grew, the route is
+still in-flight / recently ended, or parses are explicitly cleared.
+total_drive_time_s is API wall-clock; engage % uses not_in_park_time_s
+after a parse. Schema picture is in the README.
 """
 
 from __future__ import annotations
@@ -12,6 +13,8 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable, Iterator
+
+from op_usage.config import is_live_cache_path
 
 SCHEMA_VERSION = "3"  # not_in_park_time_s; does not auto-clear qlog rows
 
@@ -179,16 +182,33 @@ class Cache:
 
         `drive` must be the *new* listing (especially maxqlog), compared
         against the cached row. Call this before upsert_route_meta — after
-        an upsert the cached maxqlog already matches, so the 24h
-        “maxqlog grew” recheck never fires.
+        an upsert the cached maxqlog already matches, so a “maxqlog grew”
+        recheck never fires.
+
+        Recheck when maxqlog grew, even if start_time is older than 24h.
+        Also recheck in-flight / recently-ended routes (end_time in the
+        window) so partial qlogs are not frozen after the start watermark.
         """
         existing = self.get_drive(drive.route_name)
         if existing is None or not existing.qlog_parsed:
             return True
-        if drive.start_time_utc_ms < recheck_after_ms:
-            return False
         old, new = existing.maxqlog, drive.maxqlog
-        return new is not None and (old is None or new > old)
+        if new is not None and (old is None or new > old):
+            return True
+        return drive.end_time_utc_ms >= recheck_after_ms
+
+    def earliest_recheck_start_ms(self, recheck_after_ms: int) -> int | None:
+        """Earliest start of a cached drive that may still need a qlog pass."""
+        row = self._conn.execute(
+            """
+            SELECT MIN(start_time_utc_ms) FROM drives
+            WHERE qlog_parsed = 0 OR end_time_utc_ms >= ?
+            """,
+            (recheck_after_ms,),
+        ).fetchone()
+        if row is None or row[0] is None:
+            return None
+        return int(row[0])
 
     def iter_drives(self) -> Iterator[DriveRow]:
         for row in self._conn.execute("SELECT * FROM drives"):
@@ -196,6 +216,11 @@ class Cache:
 
     def replace_all(self, drives: Iterable[DriveRow]) -> None:
         """Used by demo/fixtures — full replace, no comma API."""
+        if is_live_cache_path(self.path):
+            raise RuntimeError(
+                "refusing to DELETE FROM drives on the live cache "
+                f"({self.path}). Pass --cache to a temp sqlite for demo."
+            )
         self._conn.execute("DELETE FROM drives")
         for drive in drives:
             self._conn.execute(_DRIVE_INSERT_SQL, _drive_values(drive, qlog_parsed=1))
@@ -242,11 +267,26 @@ ON CONFLICT(route_name) DO UPDATE SET
   dongle_id = excluded.dongle_id,
   start_time_utc_ms = excluded.start_time_utc_ms,
   end_time_utc_ms = excluded.end_time_utc_ms,
-  length_miles = excluded.length_miles,
+  length_miles = CASE
+    WHEN excluded.length_miles > 0 THEN excluded.length_miles
+    ELSE drives.length_miles
+  END,
   total_drive_time_s = excluded.total_drive_time_s,
-  git_commit = excluded.git_commit,
-  git_branch = excluded.git_branch,
-  git_remote = excluded.git_remote,
+  git_commit = CASE
+    WHEN excluded.git_commit IS NOT NULL AND TRIM(excluded.git_commit) != ''
+    THEN excluded.git_commit
+    ELSE drives.git_commit
+  END,
+  git_branch = CASE
+    WHEN excluded.git_branch IS NOT NULL AND TRIM(excluded.git_branch) != ''
+    THEN excluded.git_branch
+    ELSE drives.git_branch
+  END,
+  git_remote = CASE
+    WHEN excluded.git_remote IS NOT NULL AND TRIM(excluded.git_remote) != ''
+    THEN excluded.git_remote
+    ELSE drives.git_remote
+  END,
   maxqlog = excluded.maxqlog,
   updated_at = excluded.updated_at
 """

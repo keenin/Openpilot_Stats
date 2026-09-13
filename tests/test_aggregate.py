@@ -1,7 +1,13 @@
 from __future__ import annotations
 
 from helpers import drive_row
-from op_usage.aggregate import aggregate_commits, denominator_s, qualifies
+from op_usage.aggregate import (
+    aggregate_commits,
+    denominator_s,
+    is_master_branch,
+    park_time_usable,
+    qualifies,
+)
 
 
 def test_excludes_short_and_zero_engaged_and_missing_commit() -> None:
@@ -84,15 +90,43 @@ def test_denominator_falls_back_to_wall_clock_before_reparse() -> None:
     assert denominator_s(drive_row(not_in_park_time_s=2000, total_drive_time_s=3600)) == 2000.0
 
 
+def test_denominator_treats_zero_park_with_engaged_as_missing() -> None:
+    d = drive_row(not_in_park_time_s=0.0, total_drive_time_s=3600, engaged_time_s=1800)
+    assert park_time_usable(d) is False
+    assert denominator_s(d) == 3600.0
+    parked = drive_row(not_in_park_time_s=0.0, total_drive_time_s=3600, engaged_time_s=0.0)
+    assert park_time_usable(parked) is True
+    assert denominator_s(parked) == 0.0
+
+
+def test_engage_pct_falls_back_when_park_integral_is_zero() -> None:
+    group = [
+        drive_row(
+            route_name=f"z{i}",
+            git_commit="zero-park",
+            start_time_utc_ms=1000 + i,
+            engaged_time_s=1800,
+            total_drive_time_s=3600,
+            not_in_park_time_s=0.0,
+        )
+        for i in range(3)
+    ]
+    row = aggregate_commits(group)[0]
+    assert row.not_in_park_time_s == 10800
+    assert abs(row.engage_pct - 50.0) < 1e-9
+
+
 REMOTE = "git@github.com:commaai/openpilot.git"
 
 
 def _master(commit: str, n: int, t0: int, **kwargs):
+    prefix = kwargs.pop("prefix", commit)
+    branch = kwargs.pop("git_branch", "master")
     return [
         drive_row(
-            route_name=f"{commit}-{i}",
+            route_name=f"{prefix}-{i}",
             git_commit=commit,
-            git_branch="master",
+            git_branch=branch,
             git_remote=REMOTE,
             start_time_utc_ms=t0 + i,
             **kwargs,
@@ -168,3 +202,60 @@ def test_master_unknown_fingerprint_does_not_merge() -> None:
     b = _master("2222222222222222222222222222222222222222", 1, 2000)
     rows = aggregate_commits(a + b, weights_lookup=lambda c, r: None)
     assert rows == []
+
+
+def test_master_unknowns_do_not_merge_together() -> None:
+    a = _master("1111111111111111111111111111111111111111", 3, 1000)
+    b = _master("2222222222222222222222222222222222222222", 3, 2000)
+    rows = aggregate_commits(a + b, weights_lookup=lambda c, r: None)
+    assert {r.git_commit for r in rows} == {
+        "1111111111111111111111111111111111111111",
+        "2222222222222222222222222222222222222222",
+    }
+
+
+def test_master_rollback_sha_is_new_interval_not_wrapped() -> None:
+    """Drive timeline: do not wrap an old SHA across a newer weights era.
+
+    SHA-bucket-by-first-seen would glue early A drives to rollback A drives
+    (false wrap) and split later same-weight C away from those rollbacks
+    (false split).
+    """
+    old = "ccccccc111111111111111111111111111111111"
+    new = "ddddddd222222222222222222222222222222222"
+    later = "eeeeeee333333333333333333333333333333333"
+    drives = (
+        _master(old, 2, 1000, prefix="early")
+        + _master(new, 3, 2000)
+        + _master(old, 3, 4000, prefix="rollback")
+        + _master(later, 2, 5000)
+    )
+    fps = {old: "era-old", new: "era-new", later: "era-old"}
+    rows = aggregate_commits(drives, weights_lookup=lambda c, r: fps[c])
+    assert len(rows) == 2
+    assert rows[0].drive_count == 5
+    assert rows[0].git_commit.startswith("eeeeeee")
+    assert rows[0].era_first_commit.startswith("ccccccc")
+    assert {d.route_name for d in rows[0].drives} == {
+        "rollback-0",
+        "rollback-1",
+        "rollback-2",
+        f"{later}-0",
+        f"{later}-1",
+    }
+    assert rows[1].drive_count == 3
+    assert rows[1].git_commit.startswith("ddddddd")
+
+
+def test_master_branch_aliases_merge_like_master() -> None:
+    assert is_master_branch("master")
+    assert is_master_branch("origin/master")
+    assert is_master_branch("refs/heads/master")
+    assert is_master_branch("Master")
+    assert not is_master_branch("nightly")
+    assert not is_master_branch("my-master")
+    a = _master("aaaaaaa111111111111111111111111111111111", 2, 1000, git_branch="origin/master")
+    b = _master("bbbbbbb222222222222222222222222222222222", 1, 2000, git_branch="refs/heads/master")
+    rows = aggregate_commits(a + b, weights_lookup=lambda c, r: "era")
+    assert len(rows) == 1
+    assert rows[0].drive_count == 3

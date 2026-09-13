@@ -5,9 +5,13 @@ A group appears only if it has >= 3 qualifying drives.
 Groups sort by last qualifying drive (newest first) — never by engage %.
 
 Non-master branches: one row per SHA.
-master: consecutive SHAs that share a driving-weights fingerprint are
-one row (UI/car/CI commits do not split). Unknown fingerprints stay
-per-SHA. Engage % = engaged / not_in_park (wall-clock fallback).
+master: walk qualifying drives in start_time order and split when the
+driving-weights fingerprint changes. A SHA that reappears after a
+different fingerprint is a new interval (no first-seen SHA bucket).
+Unknown fingerprints stay fail-closed (never merge two unknown SHAs;
+consecutive drives of one unknown SHA stay one per-SHA interval).
+`origin/master` and `refs/heads/master` count as master.
+Engage % = engaged / not_in_park (wall-clock fallback).
 """
 
 from __future__ import annotations
@@ -75,10 +79,30 @@ def qualifies(drive: DriveRow, min_miles: float = MIN_MILES) -> bool:
     return (drive.engaged_time_s or 0.0) > 0
 
 
-def denominator_s(drive: DriveRow) -> float:
-    """Engage-% denominator: not-in-park seconds, else API wall-clock."""
+def park_time_usable(drive: DriveRow) -> bool:
+    """False when the gear integral is missing or unusable.
+
+    A stored 0.0 with engaged time > 0 is treated as missing (too few
+    gear samples, or an all-park integral that cannot explain engagement).
+    """
     raw = drive.not_in_park_time_s
-    return float(drive.total_drive_time_s if raw is None else raw)
+    if raw is None:
+        return False
+    if float(raw) == 0.0 and (drive.engaged_time_s or 0.0) > 0:
+        return False
+    return True
+
+
+def denominator_s(drive: DriveRow) -> float:
+    """Engage-% denominator: usable not-in-park seconds, else API wall-clock."""
+    if park_time_usable(drive):
+        return float(drive.not_in_park_time_s or 0.0)
+    return float(drive.total_drive_time_s)
+
+
+def is_master_branch(branch: str) -> bool:
+    raw = (branch or "").strip().lower()
+    return raw in {"master", "origin/master", "refs/heads/master"}
 
 
 def to_drive_view(drive: DriveRow) -> DriveView:
@@ -91,10 +115,6 @@ def to_drive_view(drive: DriveRow) -> DriveView:
         git_branch=drive.git_branch,
         git_commit=drive.git_commit,
     )
-
-
-def is_master_branch(branch: str) -> bool:
-    return (branch or "").strip().lower() == "master"
 
 
 def aggregate_commits(
@@ -125,25 +145,42 @@ def _master_eras(
     drives: list[DriveRow],
     weights_lookup: WeightsLookup | None,
 ) -> list[list[DriveRow]]:
+    """Split master drives on the drive timeline when fingerprint changes.
+
+    Bucket-by-SHA-then-sort-by-first-seen wraps rollback drives of an old
+    SHA across a newer weights era, and splits a later same-weight run
+    away from those rollback drives. Walking start_time order keeps each
+    contiguous fingerprint interval separate. Unknowns never merge.
+    """
     if not drives:
         return []
-    by_sha: dict[str, list[DriveRow]] = {}
-    first_ms: dict[str, int] = {}
-    for drive in drives:
-        key = drive.git_commit.lower()
-        by_sha.setdefault(key, []).append(drive)
-        first_ms[key] = min(first_ms.get(key, drive.start_time_utc_ms), drive.start_time_utc_ms)
-    eras: list[list[str]] = []
+    ordered = sorted(drives, key=lambda d: (d.start_time_utc_ms, d.route_name))
+    fps: dict[tuple[str, str], str | None] = {}
+    eras: list[list[DriveRow]] = []
     prev_fp: str | None = None
-    for sha in sorted(by_sha, key=lambda s: first_ms[s]):
-        sample = by_sha[sha][0]
-        fp = weights_lookup(sample.git_commit, sample.git_remote) if weights_lookup else None
-        if fp is not None and fp == prev_fp:
-            eras[-1].append(sha)
+    prev_sha = ""
+    for drive in ordered:
+        sha = drive.git_commit.lower()
+        key = (sha, drive.git_remote)
+        if key not in fps:
+            fps[key] = (
+                weights_lookup(drive.git_commit, drive.git_remote)
+                if weights_lookup
+                else None
+            )
+        fp = fps[key]
+        # Known equal fingerprints merge across SHAs. Unknowns stay fail-closed
+        # (never merge two unknown SHAs) but consecutive drives of one unknown
+        # SHA still form one per-SHA interval.
+        same_known = fp is not None and fp == prev_fp
+        same_unknown_sha = fp is None and prev_fp is None and sha == prev_sha
+        if eras and (same_known or same_unknown_sha):
+            eras[-1].append(drive)
         else:
-            eras.append([sha])
+            eras.append([drive])
         prev_fp = fp
-    return [[d for sha in shas for d in by_sha[sha]] for shas in eras]
+        prev_sha = sha
+    return eras
 
 
 def _commit_row(group: list[DriveRow]) -> CommitRow:

@@ -242,6 +242,24 @@ def test_extract_without_car_state_leaves_not_in_park_none() -> None:
     assert result.gear_sample_count == 0
 
 
+def test_single_gear_sample_is_missing_not_zero() -> None:
+    engaged = _samples([(2.0, True)], source=SELFDRIVE_SOURCE)
+    gear = [EnabledSample(0, True, GEAR_SOURCE)]
+    result = extract_engaged_time(encode_synthetic_qlog(engaged + gear, compress=None))
+    assert result.engaged_time_s > 0
+    assert result.gear_sample_count == 1
+    assert result.not_in_park_time_s is None
+
+
+def test_zero_park_integral_with_engaged_is_missing() -> None:
+    engaged = _samples([(2.0, True)], source=SELFDRIVE_SOURCE)
+    gear = _samples([(2.0, False)], source=GEAR_SOURCE)
+    result = extract_engaged_time(encode_synthetic_qlog(engaged + gear, compress=None))
+    assert result.engaged_time_s > 0
+    assert result.gear_sample_count >= 2
+    assert result.not_in_park_time_s is None
+
+
 def test_unknown_and_reverse_count_as_not_in_park() -> None:
     event_cls = _load_stub_schema()
 
