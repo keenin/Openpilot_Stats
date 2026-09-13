@@ -87,10 +87,9 @@ def main(argv: list[str] | None = None) -> int:
         format="%(asctime)s %(levelname)s %(message)s",
     )
     settings = load_settings()
-    settings = _with_overrides(settings, args.out, args.cache)
+    settings = _apply_paths(settings, args.out, args.cache, demo=args.cmd == "demo")
 
     if args.cmd == "demo":
-        settings = _demo_settings(settings, args.out, args.cache)
         stats = run_demo(settings, args.fixture)
         print(f"demo site → {stats.html_path}")
         return 0
@@ -107,21 +106,13 @@ def main(argv: list[str] | None = None) -> int:
             metadata_only=args.metadata_only,
         )
         extra = " metadata_only" if args.metadata_only else ""
-        if args.cmd == "backfill":
-            print(
-                f"backfill listed={stats.routes_listed} parsed={stats.qlogs_parsed}"
-                f"{extra} → {stats.html_path}"
-            )
-        else:
-            print(
-                f"nightly listed={stats.routes_listed} parsed={stats.qlogs_parsed} "
-                f"cached_skip={stats.qlogs_skipped_cached}{extra} → {stats.html_path}"
-            )
+        skip = f" cached_skip={stats.qlogs_skipped_cached}" if args.cmd == "nightly" else ""
+        print(
+            f"{args.cmd} listed={stats.routes_listed} parsed={stats.qlogs_parsed}"
+            f"{skip}{extra} → {stats.html_path}"
+        )
         return 0
-    if args.cmd == "deploy":
-        return _deploy(settings, dry_run=args.dry_run)
-    parser.error("unknown command")
-    return 2
+    return _deploy(settings, dry_run=args.dry_run)
 
 
 def _strip_verbose(argv: list[str]) -> tuple[list[str], bool]:
@@ -136,22 +127,17 @@ def _strip_verbose(argv: list[str]) -> tuple[list[str], bool]:
     return kept, verbose
 
 
-def _demo_settings(settings, out: Path | None, cache: Path | None):
-    """Point demo at temp paths unless the caller overrode cache/site."""
+def _apply_paths(settings, out: Path | None, cache: Path | None, *, demo: bool = False):
+    """Apply --out/--cache; demo fills omitted paths with temps."""
     updates = {}
-    if cache is None:
-        updates["cache_path"] = Path(tempfile.mkdtemp(prefix="op-usage-demo-")) / "demo.sqlite"
-    if out is None:
-        updates["site_dir"] = Path(tempfile.mkdtemp(prefix="op-usage-demo-site-"))
-    return replace(settings, **updates) if updates else settings
-
-
-def _with_overrides(settings, out: Path | None, cache: Path | None):
-    updates = {}
-    if out is not None:
-        updates["site_dir"] = out.resolve()
     if cache is not None:
         updates["cache_path"] = cache.resolve()
+    elif demo:
+        updates["cache_path"] = Path(tempfile.mkdtemp(prefix="op-usage-demo-")) / "demo.sqlite"
+    if out is not None:
+        updates["site_dir"] = out.resolve()
+    elif demo:
+        updates["site_dir"] = Path(tempfile.mkdtemp(prefix="op-usage-demo-site-"))
     return replace(settings, **updates) if updates else settings
 
 

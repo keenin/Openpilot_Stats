@@ -35,12 +35,17 @@ _HTTPS = re.compile(r"^https://github\.com/(.+?)(?:\.git)?$")
 WeightsLookup = Callable[[str, str], str | None]
 
 
-def github_repo_from_remote(remote: str) -> str:
+def github_owner_repo(remote: str) -> str | None:
+    """owner/repo from a GitHub SSH or HTTPS remote, else None."""
     raw = (remote or "").strip()
     matched = _SSH.match(raw) or _HTTPS.match(raw)
-    if matched:
-        return matched.group(1).strip("/")
-    return DEFAULT_REPO
+    if not matched:
+        return None
+    return matched.group(1).strip("/") or None
+
+
+def github_repo_from_remote(remote: str) -> str:
+    return github_owner_repo(remote) or DEFAULT_REPO
 
 
 def is_driving_weight(name: str) -> bool:
@@ -84,10 +89,6 @@ class GitHubWeightsClient:
     def disabled(self) -> bool:
         return self._disabled
 
-    def fingerprint(self, repo: str, sha: str) -> str | None:
-        found, _confirmed = self.lookup(repo, sha)
-        return found
-
     def lookup(self, repo: str, sha: str) -> tuple[str | None, bool]:
         """Return (fingerprint, confirmed).
 
@@ -98,7 +99,7 @@ class GitHubWeightsClient:
         """
         if self._disabled or not repo or not sha:
             return None, False
-        kinds: list[str] = []
+        transient = False
         for path in MODELS_DIRS:
             if self._disabled:
                 return None, False
@@ -107,14 +108,9 @@ class GitHubWeightsClient:
                 found = fingerprint_from_contents(entries or [])
                 if found:
                     return found, True
-                kinds.append("empty")
-            elif kind == "missing":
-                kinds.append("missing")
-            else:
-                kinds.append("transient")
-        if any(kind == "transient" for kind in kinds):
-            return None, False
-        return None, True
+            elif kind != "missing":
+                transient = True
+        return None, not transient
 
     def _list_dir(self, repo: str, path: str, ref: str) -> tuple[str, list[dict] | None]:
         url = f"{GITHUB_API}/repos/{repo}/contents/{path}"

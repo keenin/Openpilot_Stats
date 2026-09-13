@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import json
 import logging
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -37,14 +37,12 @@ class RunStats:
     html_path: str = ""
 
 
-def generate_from_cache(settings: Settings, cache: Cache, mode: str = "live") -> Path:
+def generate_from_cache(settings: Settings, cache: Cache) -> Path:
     commits = aggregate_commits(list(cache.iter_drives()), weights_lookup=make_weights_lookup(cache))
     html = render_site(
         commits,
-        owner_name=settings.owner_name,
         generated_at=datetime.now(timezone.utc),
         display_tz=settings.display_tz,
-        mode=mode,
     )
     path = write_site(settings.site_dir, html)
     log.info("wrote %s (%d commits)", path, len(commits))
@@ -102,7 +100,7 @@ def run_demo(settings: Settings, fixture_path: Path) -> RunStats:
     refuse_demo_on_live_paths(settings)
     with Cache(settings.cache_path) as cache:
         cache.replace_all(load_fixture_drives(fixture_path))
-        html_path = generate_from_cache(settings, cache, mode="demo")
+        html_path = generate_from_cache(settings, cache)
     return RunStats(html_path=str(html_path), routes_listed=0)
 
 
@@ -198,7 +196,7 @@ def run_pipeline(
         for meta in listed:
             incoming = _meta_to_row(meta)
             listed_names.add(meta.route_name)
-            if not metadata_only and cache.needs_qlog_parse(incoming, recheck_ms):
+            if not metadata_only and cache.needs_qlog_parse(incoming):
                 need_parse.add(meta.route_name)
             cache.upsert_route_meta(incoming)
             cache.set_watermark_ms(meta.start_time_utc_ms)
@@ -214,10 +212,9 @@ def run_pipeline(
             need_parse = {m.route_name for m in listed}
 
         if not metadata_only:
-            for row in cache.iter_drives():
-                if row.qlog_parsed or row.route_name in need_parse:
-                    continue
-                need_parse.add(row.route_name)
+            need_parse.update(
+                row.route_name for row in cache.iter_drives() if not row.qlog_parsed
+            )
 
         cache.commit()
 
@@ -271,7 +268,7 @@ def run_pipeline(
 
         cache.mark_run()
         cache.commit()
-        html_path = generate_from_cache(settings, cache, mode="live")
+        html_path = generate_from_cache(settings, cache)
         stats.html_path = str(html_path)
     return stats
 
@@ -341,17 +338,16 @@ def _window_start(
     settings: Settings,
     *,
     backfill: bool,
-    recheck_after_ms: int | None = None,
+    recheck_after_ms: int,
 ) -> int:
     watermark = cache.watermark_ms()
     if backfill or watermark == 0:
         start = datetime.fromisoformat(settings.backfill_start).replace(tzinfo=timezone.utc)
         return int(start.timestamp() * 1000)
     window = max(0, watermark - settings.recheck_hours * 3600 * 1000)
-    if recheck_after_ms is not None:
-        settling = cache.earliest_settling_start_ms(recheck_after_ms)
-        if settling is not None:
-            window = min(window, settling)
+    settling = cache.earliest_settling_start_ms(recheck_after_ms)
+    if settling is not None:
+        window = min(window, settling)
     return window
 
 
@@ -369,16 +365,8 @@ def _meta_to_row(meta: RouteMeta) -> DriveRow:
     # API wall-clock; engage % uses not_in_park_time_s from the qlog parse.
     duration = max(0.0, (meta.end_time_utc_ms - meta.start_time_utc_ms) / 1000.0)
     return DriveRow(
-        route_name=meta.route_name,
-        dongle_id=meta.dongle_id,
-        start_time_utc_ms=meta.start_time_utc_ms,
-        end_time_utc_ms=meta.end_time_utc_ms,
-        length_miles=meta.length_miles,
+        **asdict(meta),
         total_drive_time_s=duration,
-        git_commit=meta.git_commit,
-        git_branch=meta.git_branch,
-        git_remote=meta.git_remote,
-        maxqlog=meta.maxqlog,
         engaged_time_s=None,
         engaged_source=None,
         qlog_parsed=False,

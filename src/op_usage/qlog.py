@@ -34,6 +34,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable, Iterator
 
+import zstandard as zstd
+
 log = logging.getLogger(__name__)
 
 # qlogs are decimated; 5s covers typical 1–10 Hz selfdriveState without
@@ -73,8 +75,6 @@ def decompress_qlog(data: bytes) -> bytes:
     if data.startswith(b"BZh"):
         return bz2.decompress(data)
     if data.startswith(b"\x28\xb5\x2f\xfd"):
-        import zstandard as zstd
-
         dctx = zstd.ZstdDecompressor()
         with dctx.stream_reader(data) as reader:
             return reader.read()
@@ -288,7 +288,5 @@ def encode_synthetic_qlog(
     if compress == "bz2":
         return bz2.compress(raw)
     if compress == "zst":
-        import zstandard as zstd
-
         return zstd.ZstdCompressor().compress(raw)
     return raw

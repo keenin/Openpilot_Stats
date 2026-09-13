@@ -55,7 +55,6 @@ class Settings:
     cache_path: Path
     site_dir: Path
     display_tz: str
-    owner_name: str
     backfill_start: str
     openpilot_path: Path | None
     cereal_path: Path | None
@@ -99,7 +98,6 @@ def load_settings() -> Settings:
         cache_path=_expand(os.environ.get("CACHE_PATH", DEFAULT_CACHE)),
         site_dir=_expand(os.environ.get("SITE_DIR", DEFAULT_SITE)),
         display_tz=os.environ.get("DISPLAY_TZ", "America/Los_Angeles"),
-        owner_name=os.environ.get("OWNER_NAME", "one driver"),
         backfill_start=os.environ.get("BACKFILL_START", "2018-01-01"),
         openpilot_path=_expand(op_path) if op_path else None,
         cereal_path=_expand(cereal_path) if cereal_path else None,

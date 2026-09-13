@@ -81,8 +81,8 @@ def test_github_client_tries_live_then_legacy_path() -> None:
 
     sess = _Sess()
     client = GitHubWeightsClient(token=None, session=sess)
-    fp = client.fingerprint("commaai/openpilot", "deadbeef")
-    assert fp
+    fp, confirmed = client.lookup("commaai/openpilot", "deadbeef")
+    assert fp and confirmed
     assert "selfdrive/modeld/models" in sess.urls[0]
     assert "openpilot/selfdrive" not in sess.urls[0]
     assert any("openpilot/selfdrive/modeld/models" in u for u in sess.urls)
@@ -90,7 +90,7 @@ def test_github_client_tries_live_then_legacy_path() -> None:
 
 def test_weights_cache_skips_network(tmp_path) -> None:
     class _Boom:
-        def fingerprint(self, repo, sha):
+        def lookup(self, repo, sha):
             raise AssertionError("cache hit must not call GitHub")
 
     with Cache(tmp_path / "c.sqlite") as cache:
@@ -230,7 +230,6 @@ def test_generate_merges_master_via_lookup(tmp_path, monkeypatch) -> None:
         cache_path=tmp_path / "c.sqlite",
         site_dir=tmp_path / "site",
         display_tz="UTC",
-        owner_name="t",
         backfill_start="2026-09-01",
         openpilot_path=None,
         cereal_path=None,
