@@ -85,18 +85,38 @@ class GitHubWeightsClient:
         return self._disabled
 
     def fingerprint(self, repo: str, sha: str) -> str | None:
-        if self._disabled or not repo or not sha:
-            return None
-        for path in MODELS_DIRS:
-            entries = self._list_dir(repo, path, sha)
-            if entries is None:
-                continue
-            found = fingerprint_from_contents(entries)
-            if found:
-                return found
-        return None
+        found, _confirmed = self.lookup(repo, sha)
+        return found
 
-    def _list_dir(self, repo: str, path: str, ref: str) -> list[dict] | None:
+    def lookup(self, repo: str, sha: str) -> tuple[str | None, bool]:
+        """Return (fingerprint, confirmed).
+
+        `confirmed` is True for a hit, or for a miss only when every models
+        path is a 404 or a 200 with no driving-weight files. Transient
+        errors (timeouts, 5xx, RequestException) and rate-limit disable
+        are not confirmed — do not persist those misses.
+        """
+        if self._disabled or not repo or not sha:
+            return None, False
+        kinds: list[str] = []
+        for path in MODELS_DIRS:
+            if self._disabled:
+                return None, False
+            kind, entries = self._list_dir(repo, path, sha)
+            if kind == "ok":
+                found = fingerprint_from_contents(entries or [])
+                if found:
+                    return found, True
+                kinds.append("empty")
+            elif kind == "missing":
+                kinds.append("missing")
+            else:
+                kinds.append("transient")
+        if any(kind == "transient" for kind in kinds):
+            return None, False
+        return None, True
+
+    def _list_dir(self, repo: str, path: str, ref: str) -> tuple[str, list[dict] | None]:
         url = f"{GITHUB_API}/repos/{repo}/contents/{path}"
         headers = {
             "Accept": "application/vnd.github+json",
@@ -110,29 +130,29 @@ class GitHubWeightsClient:
             )
         except requests.RequestException as exc:
             log.warning("GitHub weights lookup failed for %s@%s: %s", repo, ref[:12], exc)
-            return None
+            return "transient", None
         if resp.status_code in (403, 429):
             self._disabled = True
             log.warning(
                 "GitHub rate limited on weights lookup; master SHAs stay per-commit this run"
             )
-            return None
+            return "transient", None
         if resp.status_code == 404:
-            return None
-        if not resp.ok:
+            return "missing", None
+        if resp.status_code >= 500 or not resp.ok:
             log.warning(
                 "GitHub weights lookup HTTP %s for %s@%s",
                 resp.status_code,
                 repo,
                 ref[:12],
             )
-            return None
+            return "transient", None
         payload = resp.json()
         if isinstance(payload, dict):
-            return [payload]
+            return "ok", [payload]
         if isinstance(payload, list):
-            return [item for item in payload if isinstance(item, dict)]
-        return None
+            return "ok", [item for item in payload if isinstance(item, dict)]
+        return "transient", None
 
 
 def make_weights_lookup(
@@ -159,11 +179,11 @@ def make_weights_lookup(
         nonlocal gh
         if gh is None:
             gh = GitHubWeightsClient()
-        found = gh.fingerprint(repo, commit)
+        found, confirmed = gh.lookup(repo, commit)
         if found:
             cache.set_commit_weights(repo, key, found)
             cache.commit()
-        elif not gh.disabled:
+        elif confirmed and not gh.disabled:
             cache.set_commit_weights(repo, key, MISSING_WEIGHTS)
             cache.commit()
         memo[key] = found

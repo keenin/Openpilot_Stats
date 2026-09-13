@@ -2,11 +2,14 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import requests
+
 from helpers import drive_row
 from op_usage.cache import Cache
 from op_usage.config import Settings
 from op_usage.pipeline import generate_from_cache
 from op_usage.weights import (
+    MISSING_WEIGHTS,
     fingerprint_from_contents,
     github_repo_from_remote,
     is_driving_weight,
@@ -97,23 +100,122 @@ def test_weights_cache_skips_network(tmp_path) -> None:
         assert lookup("ABC", "git@github.com:commaai/openpilot.git") == "fp-1"
 
 
-def test_weights_cache_persists_negative_miss(tmp_path) -> None:
+def test_weights_cache_persists_confirmed_negative_miss(tmp_path) -> None:
     class _Miss:
         disabled = False
         calls = 0
 
-        def fingerprint(self, repo, sha):
+        def lookup(self, repo, sha):
             self.calls += 1
-            return None
+            return None, True
 
     miss = _Miss()
     with Cache(tmp_path / "c.sqlite") as cache:
         lookup = make_weights_lookup(cache, client=miss)
         assert lookup("abc", "git@github.com:commaai/openpilot.git") is None
         assert miss.calls == 1
+        assert cache.get_commit_weights("commaai/openpilot", "abc") == MISSING_WEIGHTS
         again = make_weights_lookup(cache, client=miss)
         assert again("abc", "git@github.com:commaai/openpilot.git") is None
         assert miss.calls == 1
+
+
+def _gh_resp(status: int, payload=None):
+    class _Resp:
+        def __init__(self) -> None:
+            self.status_code = status
+            self.ok = 200 <= status < 300
+            self._payload = payload if payload is not None else {}
+
+        def json(self):
+            return self._payload
+
+    return _Resp()
+
+
+def test_lookup_confirms_both_paths_404() -> None:
+    class _Sess:
+        def get(self, url, headers=None, params=None, timeout=None):
+            return _gh_resp(404)
+
+    fp, confirmed = GitHubWeightsClient(token=None, session=_Sess()).lookup("commaai/openpilot", "deadbeef")
+    assert fp is None
+    assert confirmed is True
+
+
+def test_lookup_confirms_200_without_driving_weights() -> None:
+    class _Sess:
+        def get(self, url, headers=None, params=None, timeout=None):
+            return _gh_resp(200, [{"type": "file", "name": "README.md", "sha": "r1"}])
+
+    fp, confirmed = GitHubWeightsClient(token=None, session=_Sess()).lookup("commaai/openpilot", "deadbeef")
+    assert fp is None
+    assert confirmed is True
+
+
+def test_lookup_does_not_confirm_404_then_5xx() -> None:
+    class _Sess:
+        def __init__(self) -> None:
+            self.n = 0
+
+        def get(self, url, headers=None, params=None, timeout=None):
+            self.n += 1
+            return _gh_resp(404 if self.n == 1 else 503)
+
+    fp, confirmed = GitHubWeightsClient(token=None, session=_Sess()).lookup("commaai/openpilot", "deadbeef")
+    assert fp is None
+    assert confirmed is False
+
+
+def test_lookup_does_not_confirm_5xx() -> None:
+    class _Sess:
+        def get(self, url, headers=None, params=None, timeout=None):
+            return _gh_resp(503)
+
+    fp, confirmed = GitHubWeightsClient(token=None, session=_Sess()).lookup("commaai/openpilot", "deadbeef")
+    assert fp is None
+    assert confirmed is False
+
+
+def test_lookup_does_not_confirm_timeout() -> None:
+    class _Sess:
+        def get(self, url, headers=None, params=None, timeout=None):
+            raise requests.Timeout("boom")
+
+    fp, confirmed = GitHubWeightsClient(token=None, session=_Sess()).lookup("commaai/openpilot", "deadbeef")
+    assert fp is None
+    assert confirmed is False
+
+
+def test_lookup_does_not_confirm_rate_limit() -> None:
+    class _Sess:
+        def get(self, url, headers=None, params=None, timeout=None):
+            return _gh_resp(429)
+
+    client = GitHubWeightsClient(token=None, session=_Sess())
+    fp, confirmed = client.lookup("commaai/openpilot", "deadbeef")
+    assert fp is None
+    assert confirmed is False
+    assert client.disabled is True
+
+
+def test_weights_does_not_persist_transient_miss(tmp_path) -> None:
+    class _Transient:
+        disabled = False
+        calls = 0
+
+        def lookup(self, repo, sha):
+            self.calls += 1
+            return None, False
+
+    transient = _Transient()
+    with Cache(tmp_path / "c.sqlite") as cache:
+        lookup = make_weights_lookup(cache, client=transient)
+        assert lookup("abc", "git@github.com:commaai/openpilot.git") is None
+        assert cache.get_commit_weights("commaai/openpilot", "abc") is None
+        again = make_weights_lookup(cache, client=transient)
+        assert again("abc", "git@github.com:commaai/openpilot.git") is None
+        assert transient.calls == 2
 
 
 def test_generate_merges_master_via_lookup(tmp_path, monkeypatch) -> None:

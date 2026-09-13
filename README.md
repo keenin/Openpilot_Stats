@@ -26,7 +26,7 @@ Click the drive **count** to expand that group (date, miles, engage %). The main
 
 **Not-in-park** is `carState.gearShifter != park` with the same gap rules. Only `park` is excluded (`unknown` and every other gear count). No `carState` samples → fall back to API wall-clock. `CarState.parkingBrake` is a different signal and is not used. Cereal map: `Event.carState @22`, `gearShifter @14`, `GearShifter.park @1`.
 
-Per-route timing is **cached**. Nightly re-parses when `maxqlog` grew (any age), or when the route is still in-flight / recently ended (`end_time` in the last 24h). Late-appearing or previously unparsed cached routes are not stranded just because their `start_time` is older than the watermark window. Each successful parse is committed immediately so a long run can resume.
+Per-route timing is **cached**. Nightly **lists** the watermark − 24h window plus in-flight / recently-ended cached drives (so `maxqlog` growth is visible). Completed drives from the last 7 days get a tiny targeted metadata re-list — not a full-history `routes_segments` scan. A qlog is downloaded only when the row is unparsed or incoming `maxqlog` grew. Ancient unparsed rows are caught on a cache pass via `/files` without widening the list window. Each successful parse is committed immediately so a long run can resume.
 
 ### Reparse cached qlogs
 

@@ -1,7 +1,8 @@
 """SQLite cache: per-route metadata, engaged time, incremental watermark.
 
-qlog_parsed=1 rows are not re-read unless maxqlog grew, the route is
-still in-flight / recently ended, or parses are explicitly cleared.
+qlog_parsed=1 rows are not re-read unless incoming maxqlog grew or
+parses are explicitly cleared. The 24h end-time window is a listing
+hint (see pipeline), not a nightly re-download trigger.
 total_drive_time_s is API wall-clock; engage % uses not_in_park_time_s
 after a parse. Schema picture is in the README.
 """
@@ -14,6 +15,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable, Iterator
 
+from op_usage import MIN_MILES
 from op_usage.config import is_live_cache_path
 
 SCHEMA_VERSION = "3"  # not_in_park_time_s; does not auto-clear qlog rows
@@ -177,38 +179,48 @@ class Cache:
             )
         return int(cur.rowcount or 0)
 
-    def needs_qlog_parse(self, drive: DriveRow, recheck_after_ms: int) -> bool:
+    def needs_qlog_parse(self, drive: DriveRow, recheck_after_ms: int = 0) -> bool:
         """True if incoming API metadata still needs a qlog download.
 
-        `drive` must be the *new* listing (especially maxqlog), compared
-        against the cached row. Call this before upsert_route_meta — after
-        an upsert the cached maxqlog already matches, so a “maxqlog grew”
-        recheck never fires.
-
-        Recheck when maxqlog grew, even if start_time is older than 24h.
-        Also recheck in-flight / recently-ended routes (end_time in the
-        window) so partial qlogs are not frozen after the start watermark.
+        Parse only when the row is unparsed or incoming maxqlog grew.
+        `recheck_after_ms` is unused (listing uses end-time, not parse).
+        `drive` must be the *new* listing, compared before upsert_route_meta.
         """
         existing = self.get_drive(drive.route_name)
         if existing is None or not existing.qlog_parsed:
             return True
         old, new = existing.maxqlog, drive.maxqlog
-        if new is not None and (old is None or new > old):
-            return True
-        return drive.end_time_utc_ms >= recheck_after_ms
+        return new is not None and (old is None or new > old)
 
-    def earliest_recheck_start_ms(self, recheck_after_ms: int) -> int | None:
-        """Earliest start of a cached drive that may still need a qlog pass."""
+    def earliest_settling_start_ms(self, recheck_after_ms: int) -> int | None:
+        """Earliest start among in-flight / recently-ended cached drives.
+
+        Used to keep settling routes in the nightly *list* window so
+        maxqlog growth is visible. Does not include ancient unparsed rows.
+        """
         row = self._conn.execute(
-            """
-            SELECT MIN(start_time_utc_ms) FROM drives
-            WHERE qlog_parsed = 0 OR end_time_utc_ms >= ?
-            """,
+            "SELECT MIN(start_time_utc_ms) FROM drives WHERE end_time_utc_ms >= ?",
             (recheck_after_ms,),
         ).fetchone()
         if row is None or row[0] is None:
             return None
         return int(row[0])
+
+    def late_upload_starts(self, *, since_ms: int, recheck_after_ms: int) -> list[int]:
+        """Start times of completed-but-recent drives (late qlog uploads).
+
+        `since_ms <= end < recheck_after_ms` — older than the 24h settling
+        list window, but recent enough that comma may still append qlogs.
+        """
+        rows = self._conn.execute(
+            """
+            SELECT start_time_utc_ms FROM drives
+            WHERE end_time_utc_ms >= ? AND end_time_utc_ms < ?
+            ORDER BY start_time_utc_ms
+            """,
+            (since_ms, recheck_after_ms),
+        )
+        return [int(row[0]) for row in rows]
 
     def iter_drives(self) -> Iterator[DriveRow]:
         for row in self._conn.execute("SELECT * FROM drives"):
@@ -262,12 +274,14 @@ INSERT INTO drives (
 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 """
 
-_UPSERT_ROUTE_SQL = _DRIVE_INSERT_SQL + """
+_UPSERT_ROUTE_SQL = _DRIVE_INSERT_SQL + f"""
 ON CONFLICT(route_name) DO UPDATE SET
   dongle_id = excluded.dongle_id,
   start_time_utc_ms = excluded.start_time_utc_ms,
   end_time_utc_ms = excluded.end_time_utc_ms,
   length_miles = CASE
+    WHEN excluded.length_miles >= {MIN_MILES} THEN excluded.length_miles
+    WHEN drives.length_miles >= {MIN_MILES} THEN drives.length_miles
     WHEN excluded.length_miles > 0 THEN excluded.length_miles
     ELSE drives.length_miles
   END,

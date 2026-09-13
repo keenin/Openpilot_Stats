@@ -22,6 +22,12 @@ from op_usage.weights import make_weights_lookup
 
 log = logging.getLogger(__name__)
 
+# Completed drives older than the 24h settling list window, but recent enough
+# that comma may still append qlog segments. Targeted re-list only — not a
+# historical routes_segments scan, and not a parse trigger by itself.
+LATE_UPLOAD_HOURS = 7 * 24
+_START_WINDOW_PAD_MS = 60_000
+
 
 @dataclass
 class RunStats:
@@ -152,18 +158,23 @@ def run_pipeline(
         listed: list[RouteMeta] = []
         sample_logged = False
         for lo, hi in iter_time_chunks(start_ms, now_ms, settings.chunk_days):
-            payload = client.list_routes_segments(lo, hi)
-            if payload and not sample_logged:
-                _log_length_fields(payload[0])
-                sample_logged = True
-            chunk = normalize_routes(payload, settings.dongle_id or "")
-            log.info("  chunk %s..%s → %d routes", lo, hi, len(chunk))
-            if len(payload) >= 1000:
-                log.warning(
-                    "chunk returned %d items — possible API cap; shrink CHUNK_DAYS.",
-                    len(payload),
+            payload, sample_logged = _list_chunk(
+                client, lo, hi, settings.dongle_id or "", sample_logged
+            )
+            listed.extend(payload)
+
+        if not backfill:
+            late_since = now_ms - LATE_UPLOAD_HOURS * 3600 * 1000
+            extra = _coalesce_start_windows(cache.late_upload_starts(
+                since_ms=late_since, recheck_after_ms=recheck_ms
+            ))
+            for lo, hi in extra:
+                if lo >= start_ms:
+                    continue
+                payload, sample_logged = _list_chunk(
+                    client, lo, hi, settings.dongle_id or "", sample_logged
                 )
-            listed.extend(chunk)
+                listed.extend(payload)
 
         listed = _dedupe_routes(listed)
         stats.routes_listed = len(listed)
@@ -204,10 +215,9 @@ def run_pipeline(
 
         if not metadata_only:
             for row in cache.iter_drives():
-                if row.route_name in need_parse:
+                if row.qlog_parsed or row.route_name in need_parse:
                     continue
-                if cache.needs_qlog_parse(row, recheck_ms):
-                    need_parse.add(row.route_name)
+                need_parse.add(row.route_name)
 
         cache.commit()
 
@@ -225,6 +235,12 @@ def run_pipeline(
                     urls = client.route_qlog_urls(name)
                     blobs = [client.download_bytes(u) for u in urls]
                     result = extract_engaged_time_from_qlogs(blobs, event_mod=event_mod)
+                    if result.sample_count == 0:
+                        log.info(
+                            "  %s empty qlog parse (samples=0); keeping last-known engaged",
+                            name,
+                        )
+                        continue
                     # Store None when the gear integral is unusable; denominator_s
                     # falls back to API wall-clock. Do not write 0.0 as "measured".
                     cache.save_engaged(
@@ -260,6 +276,48 @@ def run_pipeline(
     return stats
 
 
+def _list_chunk(
+    client: CommaClient,
+    lo: int,
+    hi: int,
+    dongle_id: str,
+    sample_logged: bool,
+) -> tuple[list[RouteMeta], bool]:
+    payload = client.list_routes_segments(lo, hi)
+    if payload and not sample_logged:
+        _log_length_fields(payload[0])
+        sample_logged = True
+    chunk = normalize_routes(payload, dongle_id)
+    log.info("  chunk %s..%s → %d routes", lo, hi, len(chunk))
+    if len(payload) >= 1000:
+        log.warning(
+            "chunk returned %d items — possible API cap; shrink CHUNK_DAYS.",
+            len(payload),
+        )
+    return chunk, sample_logged
+
+
+def _coalesce_start_windows(
+    starts: list[int], pad_ms: int = _START_WINDOW_PAD_MS
+) -> list[tuple[int, int]]:
+    """Merge nearby drive starts into tiny targeted list windows."""
+    if not starts:
+        return []
+    ordered = sorted(starts)
+    windows: list[tuple[int, int]] = []
+    lo = ordered[0]
+    hi = ordered[0] + pad_ms
+    for start in ordered[1:]:
+        if start <= hi + pad_ms:
+            hi = max(hi, start + pad_ms)
+        else:
+            windows.append((lo, hi))
+            lo = start
+            hi = start + pad_ms
+    windows.append((lo, hi))
+    return windows
+
+
 def _log_length_fields(item: dict) -> None:
     """One-line dump of length-related keys from the first routes_segments object."""
     keys = sorted(str(k) for k in item.keys())
@@ -291,9 +349,9 @@ def _window_start(
         return int(start.timestamp() * 1000)
     window = max(0, watermark - settings.recheck_hours * 3600 * 1000)
     if recheck_after_ms is not None:
-        pending = cache.earliest_recheck_start_ms(recheck_after_ms)
-        if pending is not None:
-            window = min(window, pending)
+        settling = cache.earliest_settling_start_ms(recheck_after_ms)
+        if settling is not None:
+            window = min(window, settling)
     return window
 
 

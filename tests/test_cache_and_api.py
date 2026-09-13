@@ -140,12 +140,12 @@ def test_needs_qlog_parse_when_maxqlog_grows_even_if_start_is_old(tmp_path) -> N
         assert cache.needs_qlog_parse(same, recheck_after_ms=10_000) is False
 
 
-def test_needs_qlog_parse_inflight_end_time(tmp_path) -> None:
+def test_needs_qlog_parse_does_not_reparse_when_maxqlog_unchanged(tmp_path) -> None:
     with Cache(tmp_path / "c.sqlite") as cache:
         cache.upsert_route_meta(drive_row(start_time_utc_ms=1_000, end_time_utc_ms=20_000, maxqlog=1))
         cache.save_engaged("d|r", 12.5, "selfdriveState.enabled")
-        inflight = drive_row(start_time_utc_ms=1_000, end_time_utc_ms=20_000, maxqlog=1)
-        assert cache.needs_qlog_parse(inflight, recheck_after_ms=15_000) is True
+        recent = drive_row(start_time_utc_ms=1_000, end_time_utc_ms=20_000, maxqlog=1)
+        assert cache.needs_qlog_parse(recent, recheck_after_ms=15_000) is False
 
 
 def test_upsert_does_not_blank_git_or_zero_length(tmp_path) -> None:
@@ -160,7 +160,7 @@ def test_upsert_does_not_blank_git_or_zero_length(tmp_path) -> None:
         )
         cache.upsert_route_meta(
             drive_row(
-                length_miles=0.0,
+                length_miles=0.001,
                 git_commit="",
                 git_branch="",
                 git_remote="",
@@ -176,7 +176,7 @@ def test_upsert_does_not_blank_git_or_zero_length(tmp_path) -> None:
         assert row.maxqlog == 9
 
 
-def test_earliest_recheck_start_includes_unparsed_and_inflight(tmp_path) -> None:
+def test_settling_start_ignores_ancient_unparsed(tmp_path) -> None:
     with Cache(tmp_path / "c.sqlite") as cache:
         cache.upsert_route_meta(
             drive_row(route_name="done", start_time_utc_ms=1, end_time_utc_ms=2, maxqlog=1)
@@ -184,7 +184,7 @@ def test_earliest_recheck_start_includes_unparsed_and_inflight(tmp_path) -> None
         cache.save_engaged("done", 1.0, "selfdriveState.enabled")
         cache.upsert_route_meta(
             drive_row(
-                route_name="unparsed",
+                route_name="unparsed-2018",
                 start_time_utc_ms=50,
                 end_time_utc_ms=60,
                 qlog_parsed=False,
@@ -195,7 +195,8 @@ def test_earliest_recheck_start_includes_unparsed_and_inflight(tmp_path) -> None
             drive_row(route_name="inflight", start_time_utc_ms=80, end_time_utc_ms=20_000, maxqlog=1)
         )
         cache.save_engaged("inflight", 2.0, "selfdriveState.enabled")
-        assert cache.earliest_recheck_start_ms(15_000) == 50
+        assert cache.earliest_settling_start_ms(15_000) == 80
+        assert cache.late_upload_starts(since_ms=0, recheck_after_ms=15_000) == [1, 50]
 
 
 def test_replace_all_refuses_live_cache(tmp_path, monkeypatch) -> None:
