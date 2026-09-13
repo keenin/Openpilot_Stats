@@ -29,9 +29,7 @@ class DriveView:
 
     @property
     def engage_pct(self) -> float:
-        if self.not_in_park_time_s <= 0:
-            return 0.0
-        return 100.0 * self.engaged_time_s / self.not_in_park_time_s
+        return _engage_pct(self.engaged_time_s, self.not_in_park_time_s)
 
 
 @dataclass
@@ -49,29 +47,29 @@ class CommitRow:
 
     @property
     def engage_pct(self) -> float:
-        if self.not_in_park_time_s <= 0:
-            return 0.0
-        return 100.0 * self.engaged_time_s / self.not_in_park_time_s
+        return _engage_pct(self.engaged_time_s, self.not_in_park_time_s)
 
     @property
     def short_hash(self) -> str:
         return self.git_commit[:7] if self.git_commit else "unknown"
 
 
+def _engage_pct(engaged: float, denom: float) -> float:
+    if denom <= 0:
+        return 0.0
+    return 100.0 * engaged / denom
+
+
 def qualifies(drive: DriveRow, min_miles: float = MIN_MILES) -> bool:
-    if not drive.git_commit:
+    if not drive.git_commit or drive.length_miles < min_miles:
         return False
-    if drive.length_miles < min_miles:
-        return False
-    engaged = drive.engaged_time_s or 0.0
-    return engaged > 0
+    return (drive.engaged_time_s or 0.0) > 0
 
 
 def denominator_s(drive: DriveRow) -> float:
     """Engage-% denominator: not-in-park seconds, else API wall-clock."""
-    if drive.not_in_park_time_s is not None:
-        return float(drive.not_in_park_time_s)
-    return float(drive.total_drive_time_s)
+    raw = drive.not_in_park_time_s
+    return float(drive.total_drive_time_s if raw is None else raw)
 
 
 def to_drive_view(drive: DriveRow) -> DriveView:

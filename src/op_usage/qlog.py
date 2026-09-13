@@ -27,6 +27,7 @@ must keep Event.valid @67 *outside* the union — cereal does that, and putting
 from __future__ import annotations
 
 import bz2
+import importlib
 import logging
 import sys
 from dataclasses import dataclass
@@ -97,21 +98,15 @@ def engaged_seconds(samples: Iterable[EnabledSample], max_gap_s: float = MAX_GAP
 
 def pick_source(samples: list[EnabledSample]) -> tuple[list[EnabledSample], str]:
     """If any selfdriveState samples exist, ignore controlsState entirely."""
-    selfdrive = [s for s in samples if s.source == SELFDRIVE_SOURCE]
-    if selfdrive:
-        return selfdrive, SELFDRIVE_SOURCE
-    controls = [s for s in samples if s.source == CONTROLS_SOURCE]
-    if controls:
-        return controls, CONTROLS_SOURCE
+    for source in (SELFDRIVE_SOURCE, CONTROLS_SOURCE):
+        chosen = [s for s in samples if s.source == source]
+        if chosen:
+            return chosen, source
     return [], NONE_SOURCE
 
 
 def extract_engaged_time(qlog_bytes: bytes, event_mod: Any | None = None) -> EngagedResult:
-    decompressed = decompress_qlog(qlog_bytes)
-    if event_mod is None:
-        event_mod = load_event_module()
-    samples = list(_iter_samples(decompressed, event_mod))
-    return _result_from_samples(samples)
+    return extract_engaged_time_from_qlogs((qlog_bytes,), event_mod)
 
 
 def extract_engaged_time_from_qlogs(blobs: Iterable[bytes], event_mod: Any | None = None) -> EngagedResult:
@@ -120,8 +115,7 @@ def extract_engaged_time_from_qlogs(blobs: Iterable[bytes], event_mod: Any | Non
         event_mod = load_event_module()
     samples: list[EnabledSample] = []
     for blob in blobs:
-        decompressed = decompress_qlog(blob)
-        samples.extend(_iter_samples(decompressed, event_mod))
+        samples.extend(_iter_samples(decompress_qlog(blob), event_mod))
     return _result_from_samples(samples)
 
 
@@ -156,26 +150,18 @@ def load_event_module(openpilot_path: Path | None = None, cereal_path: Path | No
 def _try_cereal(openpilot_path: Path | None, cereal_path: Path | None) -> Any | None:
     extra: list[str] = []
     if openpilot_path:
-        extra.append(str(openpilot_path))
-        extra.append(str(openpilot_path.parent))
+        extra.extend((str(openpilot_path), str(openpilot_path.parent)))
     if cereal_path:
-        extra.append(str(cereal_path))
-        extra.append(str(cereal_path.parent))
+        extra.extend((str(cereal_path), str(cereal_path.parent)))
     for path in extra:
         if path not in sys.path:
             sys.path.insert(0, path)
-    try:
-        from cereal import log as capnp_log  # type: ignore
-
-        return capnp_log.Event
-    except Exception:
-        pass
-    try:
-        from openpilot.cereal import log as capnp_log  # type: ignore
-
-        return capnp_log.Event
-    except Exception:
-        return None
+    for name in ("cereal.log", "openpilot.cereal.log"):
+        try:
+            return importlib.import_module(name).Event
+        except Exception:
+            continue
+    return None
 
 
 def _load_stub_schema() -> Any:
@@ -183,8 +169,7 @@ def _load_stub_schema() -> Any:
 
     schema = Path(__file__).resolve().parent / "schemas" / "engaged.capnp"
     capnp.remove_import_hook()
-    mod = capnp.load(str(schema))
-    return mod.Event
+    return capnp.load(str(schema)).Event
 
 
 def _iter_samples(decompressed: bytes, event_cls: Any) -> Iterator[EnabledSample]:
@@ -205,37 +190,23 @@ def _iter_samples(decompressed: bytes, event_cls: Any) -> Iterator[EnabledSample
 def _event_to_samples(event: Any) -> list[EnabledSample]:
     try:
         which = event.which()
-    except Exception:
-        return []
-    try:
         mono = int(event.logMonoTime)
     except Exception:
         return []
-    if which == "selfdriveState":
-        try:
-            enabled = _read_enabled(event.selfdriveState)
-        except Exception:
+    try:
+        if which == "selfdriveState":
+            flag, source = _read_enabled(event.selfdriveState), SELFDRIVE_SOURCE
+        elif which == "controlsState":
+            flag, source = _read_enabled(event.controlsState), CONTROLS_SOURCE
+        elif which == "carState":
+            flag, source = _read_not_in_park(event.carState), GEAR_SOURCE
+        else:
             return []
-        if enabled is None:
-            return []
-        return [EnabledSample(mono, enabled, SELFDRIVE_SOURCE)]
-    if which == "controlsState":
-        try:
-            enabled = _read_enabled(event.controlsState)
-        except Exception:
-            return []
-        if enabled is None:
-            return []
-        return [EnabledSample(mono, enabled, CONTROLS_SOURCE)]
-    if which == "carState":
-        try:
-            not_in_park = _read_not_in_park(event.carState)
-        except Exception:
-            return []
-        if not_in_park is None:
-            return []
-        return [EnabledSample(mono, not_in_park, GEAR_SOURCE)]
-    return []
+    except Exception:
+        return []
+    if flag is None:
+        return []
+    return [EnabledSample(mono, flag, source)]
 
 
 def _read_enabled(obj: Any) -> bool | None:
@@ -256,9 +227,7 @@ def _read_not_in_park(car_state: Any) -> bool | None:
         gear = car_state.gearShifter
     except Exception:
         return None
-    if _gear_is_park(gear):
-        return False
-    return True
+    return not _gear_is_park(gear)
 
 
 def _gear_is_park(gear: Any) -> bool:

@@ -15,11 +15,6 @@ Verified against public docs (https://api.comma.ai / commaai/comma-api openapi.y
   GET /v1/route/{routeName}/files
        → { qlogs: [signed URLs] }  RATE LIMIT 5/min
 
-Route length (miles): live routes_segments objects use `distance`. OpenAPI still
-documents `length`. commaai/connect copies length → distance only when distance
-is absent (back-compat). Both fields are GPS path length in miles — connect
-displays them as mi / (mi × 1.60934) km. We follow that mapping.
-
 401 on /v1/me or any JSON call: mint a new user JWT at jwt.comma.ai.
 routes_segments is chunked by CHUNK_DAYS (default 14). If a window looks
 truncated (~1000 rows), shrink CHUNK_DAYS. Route ids are opaque strings.
@@ -88,22 +83,26 @@ class CommaClient:
             "User-Agent": "op-usage/0.1 (personal; not comma-connect)",
         }
 
-    def _get(self, path: str, params: dict[str, Any] | None = None) -> Any:
-        url = f"{self.api_base}{path}"
+    def _request(
+        self,
+        url: str,
+        *,
+        label: str,
+        timeout: float,
+        auth: bool = False,
+        params: dict[str, Any] | None = None,
+        include_body: bool = False,
+    ) -> requests.Response:
         last_exc: Exception | None = None
+        headers = self._headers() if auth else None
         for attempt in range(4):
             try:
-                resp = self._session.get(
-                    url,
-                    headers=self._headers(),
-                    params=params,
-                    timeout=self.timeout_s,
-                )
+                resp = self._session.get(url, headers=headers, params=params, timeout=timeout)
             except requests.RequestException as exc:
                 last_exc = exc
                 self._sleeper(min(2**attempt, 16))
                 continue
-            if resp.status_code == 401:
+            if auth and resp.status_code == 401:
                 raise CommaApiError(
                     "comma API 401 — mint a new user JWT at https://jwt.comma.ai "
                     "and update ~/.config/op-usage/credentials.env",
@@ -111,21 +110,30 @@ class CommaClient:
                 )
             if resp.status_code == 429:
                 wait = float(resp.headers.get("Retry-After", 20))
-                log.warning("rate limited on %s; sleeping %.0fs", path, wait)
-                last_exc = CommaApiError(f"{path} HTTP 429", status=429)
+                log.warning("rate limited on %s; sleeping %.0fs", label, wait)
+                last_exc = CommaApiError(f"{label} HTTP 429", status=429)
                 self._sleeper(wait)
                 continue
             if resp.status_code >= 500:
-                last_exc = CommaApiError(f"{path} HTTP {resp.status_code}", status=resp.status_code)
+                last_exc = CommaApiError(f"{label} HTTP {resp.status_code}", status=resp.status_code)
                 self._sleeper(min(2**attempt, 16))
                 continue
             if not resp.ok:
-                raise CommaApiError(
-                    f"{path} HTTP {resp.status_code}: {resp.text[:300]}",
-                    status=resp.status_code,
-                )
-            return resp.json()
-        raise CommaApiError(f"{path} failed after retries: {last_exc}")
+                extra = f": {resp.text[:300]}" if include_body else ""
+                raise CommaApiError(f"{label} HTTP {resp.status_code}{extra}", status=resp.status_code)
+            return resp
+        raise CommaApiError(f"{label} failed after retries: {last_exc}")
+
+    def _get(self, path: str, params: dict[str, Any] | None = None) -> Any:
+        resp = self._request(
+            f"{self.api_base}{path}",
+            label=path,
+            timeout=self.timeout_s,
+            auth=True,
+            params=params,
+            include_body=True,
+        )
+        return resp.json()
 
     def verify_auth(self) -> dict[str, Any]:
         """GET /v1/me — confirms the JWT (401 → mint a new one)."""
@@ -154,33 +162,8 @@ class CommaClient:
 
     def download_bytes(self, url: str) -> bytes:
         """Signed blob URL — no JWT header (the query string is the auth)."""
-        timeout = max(self.timeout_s, 120.0)
-        last_exc: Exception | None = None
-        for attempt in range(4):
-            try:
-                resp = self._session.get(url, timeout=timeout)
-            except requests.RequestException as exc:
-                last_exc = exc
-                self._sleeper(min(2**attempt, 16))
-                continue
-            if resp.status_code == 429:
-                wait = float(resp.headers.get("Retry-After", 20))
-                log.warning("rate limited on qlog download; sleeping %.0fs", wait)
-                last_exc = CommaApiError("qlog download HTTP 429", status=429)
-                self._sleeper(wait)
-                continue
-            if resp.status_code >= 500:
-                last_exc = CommaApiError(
-                    f"qlog download HTTP {resp.status_code}", status=resp.status_code
-                )
-                self._sleeper(min(2**attempt, 16))
-                continue
-            if not resp.ok:
-                raise CommaApiError(
-                    f"qlog download HTTP {resp.status_code}", status=resp.status_code
-                )
-            return resp.content
-        raise CommaApiError(f"qlog download failed after retries: {last_exc}")
+        resp = self._request(url, label="qlog download", timeout=max(self.timeout_s, 120.0))
+        return resp.content
 
 
 def normalize_routes(payload: list[dict[str, Any]], dongle_id: str) -> list[RouteMeta]:
@@ -200,19 +183,15 @@ def normalize_routes(payload: list[dict[str, Any]], dongle_id: str) -> list[Rout
 
 
 def _from_route_object(item: dict[str, Any], dongle_id: str) -> RouteMeta:
-    name = str(item.get("fullname") or item.get("canonical_route_name") or "")
     start_ms, end_ms = _route_window_ms(item)
-    maxqlog = item.get("maxqlog")
-    return RouteMeta(
-        route_name=name,
-        dongle_id=str(item.get("dongle_id") or dongle_id),
-        start_time_utc_ms=start_ms,
-        end_time_utc_ms=end_ms,
+    return _route_meta(
+        item,
+        dongle_id,
+        name=str(item.get("fullname") or item.get("canonical_route_name") or ""),
+        start_ms=start_ms,
+        end_ms=end_ms,
         length_miles=_length_miles(item),
-        git_commit=str(item.get("git_commit") or "").strip(),
-        git_branch=str(item.get("git_branch") or "").strip(),
-        git_remote=str(item.get("git_remote") or "").strip(),
-        maxqlog=int(maxqlog) if maxqlog is not None else None,
+        maxqlog=item.get("maxqlog"),
     )
 
 
@@ -236,19 +215,40 @@ def _group_segments(segments: list[dict[str, Any]], dongle_id: str) -> list[Rout
         if qlogs:
             maxqlog = max(maxqlog or 0, len(segs) - 1)
         routes.append(
-            RouteMeta(
-                route_name=name,
-                dongle_id=str(head.get("dongle_id") or dongle_id),
-                start_time_utc_ms=min(starts) if starts else 0,
-                end_time_utc_ms=max(ends) if ends else 0,
+            _route_meta(
+                head,
+                dongle_id,
+                name=name,
+                start_ms=min(starts) if starts else 0,
+                end_ms=max(ends) if ends else 0,
                 length_miles=length,
-                git_commit=str(head.get("git_commit") or "").strip(),
-                git_branch=str(head.get("git_branch") or "").strip(),
-                git_remote=str(head.get("git_remote") or "").strip(),
-                maxqlog=int(maxqlog) if maxqlog is not None else None,
+                maxqlog=maxqlog,
             )
         )
     return routes
+
+
+def _route_meta(
+    item: dict[str, Any],
+    dongle_id: str,
+    *,
+    name: str,
+    start_ms: int,
+    end_ms: int,
+    length_miles: float,
+    maxqlog: Any,
+) -> RouteMeta:
+    return RouteMeta(
+        route_name=name,
+        dongle_id=str(item.get("dongle_id") or dongle_id),
+        start_time_utc_ms=start_ms,
+        end_time_utc_ms=end_ms,
+        length_miles=length_miles,
+        git_commit=str(item.get("git_commit") or "").strip(),
+        git_branch=str(item.get("git_branch") or "").strip(),
+        git_remote=str(item.get("git_remote") or "").strip(),
+        maxqlog=int(maxqlog) if maxqlog is not None else None,
+    )
 
 
 def _length_miles(item: dict[str, Any]) -> float:
@@ -269,9 +269,7 @@ def _length_miles(item: dict[str, Any]) -> float:
         miles = float(raw)
     except (TypeError, ValueError):
         return 0.0
-    if miles < 0.0:
-        return 0.0
-    return miles
+    return max(miles, 0.0)
 
 
 def _route_window_ms(item: dict[str, Any]) -> tuple[int, int]:

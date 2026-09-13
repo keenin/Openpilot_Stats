@@ -9,7 +9,7 @@ from __future__ import annotations
 import json
 import logging
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from pathlib import Path
 
 from op_usage.aggregate import aggregate_commits
@@ -76,10 +76,7 @@ def load_fixture_drives(path: Path) -> list[DriveRow]:
 
 
 def run_demo(settings: Settings, fixture_path: Path) -> RunStats:
-    settings.site_dir.mkdir(parents=True, exist_ok=True)
-    cache_path = settings.cache_path
-    cache_path.parent.mkdir(parents=True, exist_ok=True)
-    with Cache(cache_path) as cache:
+    with Cache(settings.cache_path) as cache:
         cache.replace_all(load_fixture_drives(fixture_path))
         html_path = generate_from_cache(settings, cache, mode="demo")
     return RunStats(html_path=str(html_path), routes_listed=0)
@@ -124,7 +121,7 @@ def run_pipeline(
                 cache.schema_upgraded_from,
                 SCHEMA_VERSION,
             )
-        start_ms = _window_start(cache, settings, backfill=backfill, now_ms=now_ms)
+        start_ms = _window_start(cache, settings, backfill=backfill)
         log.info(
             "listing routes %s → now (chunk=%dd, backfill=%s, metadata_only=%s)",
             datetime.fromtimestamp(start_ms / 1000, tz=timezone.utc).date(),
@@ -249,13 +246,12 @@ def _dedupe_routes(routes: list[RouteMeta]) -> list[RouteMeta]:
     return list(by_name.values())
 
 
-def _window_start(cache: Cache, settings: Settings, *, backfill: bool, now_ms: int) -> int:
+def _window_start(cache: Cache, settings: Settings, *, backfill: bool) -> int:
     watermark = cache.watermark_ms()
     if backfill or watermark == 0:
         start = datetime.fromisoformat(settings.backfill_start).replace(tzinfo=timezone.utc)
         return int(start.timestamp() * 1000)
-    recheck = timedelta(hours=settings.recheck_hours)
-    return max(0, watermark - int(recheck.total_seconds() * 1000))
+    return max(0, watermark - settings.recheck_hours * 3600 * 1000)
 
 
 def _ts_ms(item: dict, ms_key: str, iso_key: str) -> int:
@@ -269,9 +265,7 @@ def _ts_ms(item: dict, ms_key: str, iso_key: str) -> int:
 
 
 def _meta_to_row(meta: RouteMeta) -> DriveRow:
-    # API wall-clock route duration (segment start/end). Stored as
-    # total_drive_time_s for diagnostics / fallback. Engage % uses
-    # not_in_park_time_s from the qlog parse, not this value.
+    # API wall-clock; engage % uses not_in_park_time_s from the qlog parse.
     duration = max(0.0, (meta.end_time_utc_ms - meta.start_time_utc_ms) / 1000.0)
     return DriveRow(
         route_name=meta.route_name,

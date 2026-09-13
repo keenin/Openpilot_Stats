@@ -60,8 +60,8 @@ def format_miles(miles: float) -> str:
 
 
 def format_date_range(first_ms: int, last_ms: int, tz: ZoneInfo) -> str:
-    first = datetime.fromtimestamp(first_ms / 1000, tz=timezone.utc).astimezone(tz)
-    last = datetime.fromtimestamp(last_ms / 1000, tz=timezone.utc).astimezone(tz)
+    first = _local(first_ms, tz)
+    last = _local(last_ms, tz)
     if first.date() == last.date():
         return first.strftime("%b %-d, %Y")
     if first.year == last.year:
@@ -70,23 +70,20 @@ def format_date_range(first_ms: int, last_ms: int, tz: ZoneInfo) -> str:
 
 
 def format_drive_date(ms: int, tz: ZoneInfo) -> str:
-    dt = datetime.fromtimestamp(ms / 1000, tz=timezone.utc).astimezone(tz)
-    return dt.strftime("%Y-%m-%d %H:%M")
+    return _local(ms, tz).strftime("%Y-%m-%d %H:%M")
+
+
+def _local(ms: int, tz: ZoneInfo) -> datetime:
+    return datetime.fromtimestamp(ms / 1000, tz=timezone.utc).astimezone(tz)
 
 
 def commit_url(remote: str, full_hash: str) -> str | None:
     if not remote or not full_hash:
         return None
-    repo = None
-    m = GITHUB_SSH.match(remote.strip())
-    if m:
-        repo = m.group(1)
-    m = GITHUB_HTTPS.match(remote.strip())
-    if m:
-        repo = m.group(1)
-    if not repo:
+    matched = GITHUB_SSH.match(remote.strip()) or GITHUB_HTTPS.match(remote.strip())
+    if not matched:
         return None
-    return f"https://github.com/{repo}/commit/{full_hash}"
+    return f"https://github.com/{matched.group(1)}/commit/{full_hash}"
 
 
 def _commit_block(commit: CommitRow, tz: ZoneInfo) -> str:

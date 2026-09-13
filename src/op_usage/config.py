@@ -8,7 +8,7 @@ from pathlib import Path
 
 
 def _expand(path: str) -> Path:
-    return Path(os.path.expanduser(path)).resolve()
+    return Path(path).expanduser().resolve()
 
 
 def _load_env_file(path: Path) -> None:
@@ -28,21 +28,19 @@ def _load_env_file(path: Path) -> None:
 def load_credential_files() -> list[Path]:
     """Load first-found config files. Existing process env always wins."""
     loaded: list[Path] = []
+    seen: set[Path] = set()
     explicit = os.environ.get("OP_USAGE_CONFIG")
     candidates: list[Path] = []
     if explicit:
         candidates.append(_expand(explicit))
     candidates.append(_expand("~/.config/op-usage/credentials.env"))
-    # Repo-local .env is supported for machine-specific overrides; gitignored.
     candidates.append(Path.cwd() / ".env")
-    seen: set[Path] = set()
     for path in candidates:
-        if path in seen:
+        if path in seen or not path.is_file():
             continue
         seen.add(path)
-        if path.is_file():
-            _load_env_file(path)
-            loaded.append(path)
+        _load_env_file(path)
+        loaded.append(path)
     return loaded
 
 
