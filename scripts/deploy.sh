@@ -1,5 +1,4 @@
 #!/usr/bin/env bash
-# wrangler pages deploy. Auth: wrangler login or CLOUDFLARE_* in credentials.env (not git).
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 SITE="${SITE_DIR:-$ROOT/site}"

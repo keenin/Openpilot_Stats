@@ -1,5 +1,4 @@
 #!/usr/bin/env bash
-# Incremental fetch → HTML → Cloudflare Pages (Debian host, not the browser).
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"

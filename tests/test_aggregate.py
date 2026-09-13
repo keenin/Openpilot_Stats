@@ -9,6 +9,24 @@ from op_usage.aggregate import (
     qualifies,
 )
 
+REMOTE = "git@github.com:commaai/openpilot.git"
+
+
+def _master(commit: str, n: int, t0: int, **kwargs):
+    prefix = kwargs.pop("prefix", commit)
+    branch = kwargs.pop("git_branch", "master")
+    return [
+        drive_row(
+            route_name=f"{prefix}-{i}",
+            git_commit=commit,
+            git_branch=branch,
+            git_remote=REMOTE,
+            start_time_utc_ms=t0 + i,
+            **kwargs,
+        )
+        for i in range(n)
+    ]
+
 
 def test_excludes_short_and_zero_engaged_and_missing_commit() -> None:
     assert not qualifies(drive_row(length_miles=0.9, engaged_time_s=100))
@@ -84,22 +102,16 @@ def test_engage_pct_uses_not_in_park_not_wall_clock() -> None:
     assert row.drives[0].engage_pct == 90.0
 
 
-def test_denominator_falls_back_to_wall_clock_before_reparse() -> None:
-    d = drive_row(not_in_park_time_s=None, total_drive_time_s=3600, engaged_time_s=1800)
-    assert denominator_s(d) == 3600.0
+def test_denominator_park_zero_with_engaged_falls_back() -> None:
+    missing = drive_row(not_in_park_time_s=None, total_drive_time_s=3600, engaged_time_s=1800)
+    assert denominator_s(missing) == 3600.0
     assert denominator_s(drive_row(not_in_park_time_s=2000, total_drive_time_s=3600)) == 2000.0
-
-
-def test_denominator_treats_zero_park_with_engaged_as_missing() -> None:
-    d = drive_row(not_in_park_time_s=0.0, total_drive_time_s=3600, engaged_time_s=1800)
-    assert park_time_usable(d) is False
-    assert denominator_s(d) == 3600.0
+    zero = drive_row(not_in_park_time_s=0.0, total_drive_time_s=3600, engaged_time_s=1800)
+    assert park_time_usable(zero) is False
+    assert denominator_s(zero) == 3600.0
     parked = drive_row(not_in_park_time_s=0.0, total_drive_time_s=3600, engaged_time_s=0.0)
     assert park_time_usable(parked) is True
     assert denominator_s(parked) == 0.0
-
-
-def test_engage_pct_falls_back_when_park_integral_is_zero() -> None:
     group = [
         drive_row(
             route_name=f"z{i}",
@@ -116,62 +128,17 @@ def test_engage_pct_falls_back_when_park_integral_is_zero() -> None:
     assert abs(row.engage_pct - 50.0) < 1e-9
 
 
-REMOTE = "git@github.com:commaai/openpilot.git"
-
-
-def _master(commit: str, n: int, t0: int, **kwargs):
-    prefix = kwargs.pop("prefix", commit)
-    branch = kwargs.pop("git_branch", "master")
-    return [
-        drive_row(
-            route_name=f"{prefix}-{i}",
-            git_commit=commit,
-            git_branch=branch,
-            git_remote=REMOTE,
-            start_time_utc_ms=t0 + i,
-            **kwargs,
-        )
-        for i in range(n)
-    ]
-
-
 def test_non_master_stays_one_row_per_sha_even_with_lookup() -> None:
-    """Nightly/other branches ignore weights fingerprints."""
-    fps = {
-        "aaa1111111111111111111111111111111111111": "same",
-        "bbb2222222222222222222222222222222222222": "same",
-    }
-    a = [
-        drive_row(
-            route_name=f"n{i}",
-            git_commit="aaa1111111111111111111111111111111111111",
-            git_branch="nightly",
-            start_time_utc_ms=1000 + i,
-        )
-        for i in range(3)
-    ]
-    b = [
-        drive_row(
-            route_name=f"m{i}",
-            git_commit="bbb2222222222222222222222222222222222222",
-            git_branch="nightly",
-            start_time_utc_ms=2000 + i,
-        )
-        for i in range(3)
-    ]
-    rows = aggregate_commits(a + b, weights_lookup=lambda c, r: fps[c.lower()])
-    assert {r.git_commit for r in rows} == {
-        "aaa1111111111111111111111111111111111111",
-        "bbb2222222222222222222222222222222222222",
-    }
+    a = _master("aaa1111111111111111111111111111111111111", 3, 1000, git_branch="nightly")
+    b = _master("bbb2222222222222222222222222222222222222", 3, 2000, git_branch="nightly")
+    rows = aggregate_commits(a + b, weights_lookup=lambda c, r: "same")
+    assert {r.git_commit for r in rows} == {a[0].git_commit, b[0].git_commit}
 
 
 def test_master_same_weights_merge_and_three_rule_uses_merged_count() -> None:
-    """Two master SHAs with 2+1 qualifying drives list as one era."""
     a = _master("aaaaaaa111111111111111111111111111111111", 2, 1000)
     b = _master("bbbbbbb222222222222222222222222222222222", 1, 2000)
-    fps = {d.git_commit: "era-1" for d in a + b}
-    rows = aggregate_commits(a + b, weights_lookup=lambda c, r: fps[c])
+    rows = aggregate_commits(a + b, weights_lookup=lambda c, r: "era-1")
     assert len(rows) == 1
     assert rows[0].drive_count == 3
     assert rows[0].git_branch == "master"
@@ -179,48 +146,23 @@ def test_master_same_weights_merge_and_three_rule_uses_merged_count() -> None:
     assert rows[0].era_first_commit.startswith("aaaaaaa")
     assert rows[0].short_hash == "aaaaaaa…bbbbbbb"
     assert rows[0].last_drive_ms == 2000
-
-
-def test_master_weights_change_starts_new_group() -> None:
-    old = _master("ccccccc111111111111111111111111111111111", 3, 1000)
-    new = _master("ddddddd222222222222222222222222222222222", 3, 5000)
-    fps = {d.git_commit: ("old" if d.git_commit.startswith("c") else "new") for d in old + new}
-    rows = aggregate_commits(old + new, weights_lookup=lambda c, r: fps[c])
-    assert [r.git_commit[:7] for r in rows] == ["ddddddd", "ccccccc"]
-    assert [r.drive_count for r in rows] == [3, 3]
-
-
-def test_master_merged_group_still_requires_three() -> None:
-    a = _master("eeeeeee111111111111111111111111111111111", 1, 1000)
-    b = _master("fffffff222222222222222222222222222222222", 1, 2000)
-    rows = aggregate_commits(a + b, weights_lookup=lambda c, r: "same")
-    assert rows == []
+    thin = _master("eeeeeee111111111111111111111111111111111", 1, 1000)
+    thin += _master("fffffff222222222222222222222222222222222", 1, 2000)
+    assert aggregate_commits(thin, weights_lookup=lambda c, r: "same") == []
 
 
 def test_master_unknown_fingerprint_does_not_merge() -> None:
     a = _master("1111111111111111111111111111111111111111", 2, 1000)
     b = _master("2222222222222222222222222222222222222222", 1, 2000)
-    rows = aggregate_commits(a + b, weights_lookup=lambda c, r: None)
-    assert rows == []
-
-
-def test_master_unknowns_do_not_merge_together() -> None:
-    a = _master("1111111111111111111111111111111111111111", 3, 1000)
-    b = _master("2222222222222222222222222222222222222222", 3, 2000)
-    rows = aggregate_commits(a + b, weights_lookup=lambda c, r: None)
-    assert {r.git_commit for r in rows} == {
-        "1111111111111111111111111111111111111111",
-        "2222222222222222222222222222222222222222",
-    }
+    assert aggregate_commits(a + b, weights_lookup=lambda c, r: None) == []
+    listed = _master("1111111111111111111111111111111111111111", 3, 1000)
+    listed += _master("2222222222222222222222222222222222222222", 3, 2000)
+    rows = aggregate_commits(listed, weights_lookup=lambda c, r: None)
+    assert {r.git_commit for r in rows} == {listed[0].git_commit, listed[3].git_commit}
 
 
 def test_master_rollback_sha_is_new_interval_not_wrapped() -> None:
-    """Drive timeline: do not wrap an old SHA across a newer weights era.
-
-    SHA-bucket-by-first-seen would glue early A drives to rollback A drives
-    (false wrap) and split later same-weight C away from those rollbacks
-    (false split).
-    """
+    # Walk start-time order: a SHA after a different fingerprint is a new interval.
     old = "ccccccc111111111111111111111111111111111"
     new = "ddddddd222222222222222222222222222222222"
     later = "eeeeeee333333333333333333333333333333333"
