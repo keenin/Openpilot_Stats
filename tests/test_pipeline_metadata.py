@@ -131,7 +131,14 @@ def test_metadata_only_upserts_without_qlogs_or_blanking(tmp_path, monkeypatch) 
         fake,
         [
             lambda c: seed_parsed(
-                c, ROUTE["fullname"], engaged=12509.5, dongle_id=ROUTE["dongle_id"], length_miles=0.0
+                c,
+                ROUTE["fullname"],
+                engaged=12509.5,
+                dongle_id=ROUTE["dongle_id"],
+                length_miles=0.0,
+                git_commit="goodcommit",
+                git_branch="nightly",
+                git_remote=ROUTE["git_remote"],
             )
         ],
         None,
@@ -147,6 +154,7 @@ def test_metadata_only_upserts_without_qlogs_or_blanking(tmp_path, monkeypatch) 
     assert row.engaged_time_s == 12509.5
     assert row.qlog_parsed is True
     assert row.engaged_source == "selfdriveState.enabled"
+    assert row.git_remote == ROUTE["git_remote"]
     assert (settings.site_dir / "index.html").is_file()
 
     blank = {
@@ -164,6 +172,7 @@ def test_metadata_only_upserts_without_qlogs_or_blanking(tmp_path, monkeypatch) 
     assert row.length_miles == 12.5
     assert row.git_commit == "abcabcabc"
     assert row.git_branch == "nightly"
+    assert row.git_remote == ROUTE["git_remote"]
     assert row.engaged_time_s == 12509.5
 
 

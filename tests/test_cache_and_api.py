@@ -106,7 +106,7 @@ def test_clear_engaged_parses_scope_and_reparse(tmp_path) -> None:
         assert cache.needs_qlog_parse(drive_row(maxqlog=1)) is True
 
 
-def test_needs_qlog_parse_grows_or_in_window_only(tmp_path) -> None:
+def test_needs_qlog_parse_when_maxqlog_grows(tmp_path) -> None:
     with Cache(tmp_path / "c.sqlite") as cache:
         seed_parsed(cache, start_time_utc_ms=1_000, end_time_utc_ms=2_000, maxqlog=1)
         grown = drive_row(start_time_utc_ms=1_000, end_time_utc_ms=2_000, maxqlog=4)
@@ -121,10 +121,29 @@ def test_needs_qlog_parse_grows_or_in_window_only(tmp_path) -> None:
 
 
 def test_upsert_keeps_engaged_and_last_known_good(tmp_path) -> None:
+    remote = "git@github.com:commaai/openpilot.git"
     with Cache(tmp_path / "c.sqlite") as cache:
-        cache.upsert_route_meta(drive_row(length_miles=0.0, qlog_parsed=False, engaged_time_s=None))
+        cache.upsert_route_meta(
+            drive_row(
+                length_miles=0.0,
+                qlog_parsed=False,
+                engaged_time_s=None,
+                git_commit="abcabcabc",
+                git_branch="nightly",
+                git_remote=remote,
+            )
+        )
         cache.save_engaged("d|r", 42.0, "selfdriveState.enabled", 80.0)
-        cache.upsert_route_meta(drive_row(length_miles=12.5, qlog_parsed=False, engaged_time_s=None))
+        cache.upsert_route_meta(
+            drive_row(
+                length_miles=12.5,
+                qlog_parsed=False,
+                engaged_time_s=None,
+                git_commit="abcabcabc",
+                git_branch="nightly",
+                git_remote=remote,
+            )
+        )
         row = cache.get_drive("d|r")
         assert row is not None
         assert row.length_miles == 12.5
@@ -144,8 +163,9 @@ def test_upsert_keeps_engaged_and_last_known_good(tmp_path) -> None:
         row = cache.get_drive("d|r")
         assert row is not None
         assert row.length_miles == 12.5
-        assert row.git_commit == "abc"
+        assert row.git_commit == "abcabcabc"
         assert row.git_branch == "nightly"
+        assert row.git_remote == remote
         assert row.maxqlog == 9
 
 

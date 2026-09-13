@@ -1,8 +1,13 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import requests
 
+from helpers import drive_row
 from op_usage.cache import Cache
+from op_usage.config import Settings
+from op_usage.pipeline import generate_from_cache
 from op_usage.weights import (
     MISSING_WEIGHTS,
     fingerprint_from_contents,
@@ -159,3 +164,46 @@ def test_weights_cache_confirmed_miss_only(tmp_path) -> None:
         again = make_weights_lookup(cache, client=transient)
         assert again("abc", "git@github.com:commaai/openpilot.git") is None
         assert transient.calls == 2
+
+
+def test_generate_merges_master_via_lookup(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(
+        "op_usage.pipeline.make_weights_lookup",
+        lambda cache, **k: (lambda commit, remote: "era"),
+    )
+    settings = Settings(
+        comma_jwt=None,
+        dongle_id=None,
+        api_base="https://example.invalid",
+        cache_path=tmp_path / "c.sqlite",
+        site_dir=tmp_path / "site",
+        display_tz="UTC",
+        owner_name="t",
+        backfill_start="2026-09-01",
+        openpilot_path=None,
+        cereal_path=None,
+        cf_pages_project="op-usage",
+        chunk_days=30,
+        recheck_hours=24,
+        files_min_interval_s=13,
+        request_timeout_s=60,
+    )
+    with Cache(settings.cache_path) as cache:
+        drives = [
+            drive_row(
+                route_name=f"m{i}",
+                git_commit="aaaaaaa111111111111111111111111111111111" if i < 2 else "bbbbbbb222222222222222222222222222222222",
+                git_branch="master",
+                git_remote="git@github.com:commaai/openpilot.git",
+                start_time_utc_ms=1000 + i,
+            )
+            for i in range(3)
+        ]
+        cache.replace_all(drives)
+        path = generate_from_cache(settings, cache)
+    html = Path(path).read_text(encoding="utf-8")
+    assert "master" in html
+    assert "aaaaaaa…bbbbbbb" in html
+    assert html.count('class="commit"') == 1
+    assert "aaaaaaa111111111111111111111111111111111 … bbbbbbb222222222222222222222222222222222" in html
+
