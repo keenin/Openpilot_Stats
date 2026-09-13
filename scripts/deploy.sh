@@ -1,7 +1,5 @@
 #!/usr/bin/env bash
-# Deploy site/ to Cloudflare Pages. Requires wrangler login or
-# CLOUDFLARE_API_TOKEN + CLOUDFLARE_ACCOUNT_ID in the environment
-# (put those in ~/.config/op-usage/credentials.env — never in git).
+# wrangler pages deploy. Auth: wrangler login or CLOUDFLARE_* in credentials.env (not git).
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 SITE="${SITE_DIR:-$ROOT/site}"

@@ -1,27 +1,34 @@
 from __future__ import annotations
 
-from op_usage.cache import SCHEMA_VERSION, Cache, DriveRow
-from op_usage.comma_api import iter_time_chunks, normalize_routes
+import pytest
+
+from helpers import drive_row
+from op_usage.cache import SCHEMA_VERSION, Cache
+from op_usage.comma_api import CommaApiError, CommaClient, iter_time_chunks, normalize_routes
 
 
-def _row(**kwargs) -> DriveRow:
-    base = dict(
-        route_name="d|r",
-        dongle_id="deadbeefcafebabe",
-        start_time_utc_ms=1_000,
-        end_time_utc_ms=2_000,
-        length_miles=3.0,
-        total_drive_time_s=100.0,
-        git_commit="abc",
-        git_branch="n",
-        git_remote="",
-        maxqlog=1,
-        engaged_time_s=10.0,
-        engaged_source="selfdriveState.enabled",
-        qlog_parsed=True,
-    )
-    base.update(kwargs)
-    return DriveRow(**base)
+def _seg(**kwargs) -> dict:
+    row = {
+        "fullname": "d|r",
+        "dongle_id": "d",
+        "git_commit": "abc",
+        "git_branch": "n",
+        "git_remote": "",
+        "maxqlog": 1,
+        "segment_start_times": [1],
+        "segment_end_times": [2],
+    }
+    row.update(kwargs)
+    return row
+
+
+class _Resp:
+    def __init__(self, status: int, content: bytes = b"", text: str = "") -> None:
+        self.status_code = status
+        self.text = text
+        self.headers: dict = {}
+        self.ok = 200 <= status < 300
+        self.content = content
 
 
 def test_migrates_not_in_park_column_on_old_sqlite(tmp_path) -> None:
@@ -77,9 +84,9 @@ def test_watermark_only_moves_forward(tmp_path) -> None:
 
 def test_clear_engaged_parses_can_scope_to_listed_routes(tmp_path) -> None:
     with Cache(tmp_path / "c.sqlite") as cache:
-        cache.upsert_route_meta(_row(route_name="keep", qlog_parsed=False, engaged_time_s=None))
+        cache.upsert_route_meta(drive_row(route_name="keep", qlog_parsed=False, engaged_time_s=None))
         cache.save_engaged("keep", 11.0, "selfdriveState.enabled", 20.0)
-        cache.upsert_route_meta(_row(route_name="wipe", qlog_parsed=False, engaged_time_s=None))
+        cache.upsert_route_meta(drive_row(route_name="wipe", qlog_parsed=False, engaged_time_s=None))
         cache.save_engaged("wipe", 9.0, "selfdriveState.enabled", 15.0)
         n = cache.clear_engaged_parses(route_names=["wipe"])
         assert n == 1
@@ -93,13 +100,13 @@ def test_clear_engaged_parses_can_scope_to_listed_routes(tmp_path) -> None:
 
 def test_clear_engaged_parses_allows_reparse(tmp_path) -> None:
     with Cache(tmp_path / "c.sqlite") as cache:
-        cache.upsert_route_meta(_row(qlog_parsed=False, engaged_time_s=None))
+        cache.upsert_route_meta(drive_row(qlog_parsed=False, engaged_time_s=None))
         cache.save_engaged("d|r", 0.0, "controlsState.enabled", 50.0)
         existing = cache.get_drive("d|r")
         assert existing and existing.qlog_parsed
         assert existing.engaged_time_s == 0.0
         assert existing.not_in_park_time_s == 50.0
-        assert cache.needs_qlog_parse(_row(maxqlog=1), recheck_after_ms=10_000) is False
+        assert cache.needs_qlog_parse(drive_row(maxqlog=1), recheck_after_ms=10_000) is False
         n = cache.clear_engaged_parses()
         assert n == 1
         cleared = cache.get_drive("d|r")
@@ -107,36 +114,34 @@ def test_clear_engaged_parses_allows_reparse(tmp_path) -> None:
         assert cleared.engaged_time_s is None
         assert cleared.engaged_source is None
         assert cleared.not_in_park_time_s is None
-        assert cache.needs_qlog_parse(_row(maxqlog=1), recheck_after_ms=10_000) is True
+        assert cache.needs_qlog_parse(drive_row(maxqlog=1), recheck_after_ms=10_000) is True
 
 
 def test_parsed_qlog_not_redone_outside_recheck(tmp_path) -> None:
     with Cache(tmp_path / "c.sqlite") as cache:
-        cache.upsert_route_meta(_row(qlog_parsed=False, engaged_time_s=None))
+        cache.upsert_route_meta(drive_row(qlog_parsed=False, engaged_time_s=None))
         cache.save_engaged("d|r", 12.5, "selfdriveState.enabled")
         existing = cache.get_drive("d|r")
         assert existing and existing.qlog_parsed
-        newer_meta = _row(maxqlog=1)
-        assert cache.needs_qlog_parse(newer_meta, recheck_after_ms=10_000) is False
-        in_window = _row(start_time_utc_ms=20_000, maxqlog=4)
-        cache.upsert_route_meta(_row(start_time_utc_ms=20_000, maxqlog=1, qlog_parsed=True))
+        assert cache.needs_qlog_parse(drive_row(maxqlog=1), recheck_after_ms=10_000) is False
+        in_window = drive_row(start_time_utc_ms=20_000, maxqlog=4)
+        cache.upsert_route_meta(drive_row(start_time_utc_ms=20_000, maxqlog=1, qlog_parsed=True))
         cache.save_engaged("d|r", 12.5, "selfdriveState.enabled")
         assert cache.needs_qlog_parse(in_window, recheck_after_ms=15_000) is True
 
 
-def test_normalize_route_segments() -> None:
+def test_normalize_route_times_and_git() -> None:
     payload = [
-        {
-            "fullname": "deadbeefcafebabe|2026-01-01--00-00-00",
-            "dongle_id": "deadbeefcafebabe",
-            "length": 12.5,
-            "git_commit": "abc",
-            "git_branch": "nightly",
-            "git_remote": "git@github.com:commaai/openpilot.git",
-            "maxqlog": 8,
-            "segment_start_times": [1000, 2000],
-            "segment_end_times": [2000, 3000],
-        }
+        _seg(
+            fullname="deadbeefcafebabe|2026-01-01--00-00-00",
+            dongle_id="deadbeefcafebabe",
+            length=12.5,
+            git_branch="nightly",
+            git_remote="git@github.com:commaai/openpilot.git",
+            maxqlog=8,
+            segment_start_times=[1000, 2000],
+            segment_end_times=[2000, 3000],
+        )
     ]
     routes = normalize_routes(payload, "deadbeefcafebabe")
     assert len(routes) == 1
@@ -146,90 +151,28 @@ def test_normalize_route_segments() -> None:
     assert routes[0].git_commit == "abc"
 
 
-def test_normalize_prefers_distance_over_length() -> None:
-    """Live routes_segments uses `distance` (miles). OpenAPI still says `length`.
-
-    commaai/connect copies length → distance only when distance is absent.
-    A leftover tiny `length` must not hide a real `distance`.
-    """
-    payload = [
-        {
-            "fullname": "d|r",
-            "dongle_id": "d",
-            "distance": 18.4,
-            "length": 0.00179515,
-            "git_commit": "abc",
-            "git_branch": "nightly",
-            "git_remote": "",
-            "maxqlog": 2,
-            "segment_start_times": [1000],
-            "segment_end_times": [61000],
-        }
-    ]
-    routes = normalize_routes(payload, "d")
-    assert routes[0].length_miles == 18.4
-
-
-def test_normalize_distance_only() -> None:
-    payload = [
-        {
-            "fullname": "d|r",
-            "dongle_id": "d",
-            "distance": 9.25,
-            "git_commit": "abc",
-            "git_branch": "n",
-            "git_remote": "",
-            "maxqlog": 1,
-            "segment_start_times": [1],
-            "segment_end_times": [2],
-        }
-    ]
-    routes = normalize_routes(payload, "d")
-    assert routes[0].length_miles == 9.25
-
-
-def test_normalize_missing_length_is_zero() -> None:
-    payload = [
-        {
-            "fullname": "d|r",
-            "dongle_id": "d",
-            "git_commit": "abc",
-            "git_branch": "n",
-            "git_remote": "",
-            "maxqlog": 1,
-            "segment_start_times": [1],
-            "segment_end_times": [2],
-        }
-    ]
-    routes = normalize_routes(payload, "d")
-    assert routes[0].length_miles == 0.0
-
-
-def test_normalize_explicit_zero_distance_not_overridden_by_length() -> None:
-    payload = [
-        {
-            "fullname": "d|r",
-            "dongle_id": "d",
-            "distance": 0,
-            "length": 12.5,
-            "git_commit": "abc",
-            "git_branch": "n",
-            "git_remote": "",
-            "maxqlog": 1,
-            "segment_start_times": [1],
-            "segment_end_times": [2],
-        }
-    ]
-    routes = normalize_routes(payload, "d")
-    assert routes[0].length_miles == 0.0
+@pytest.mark.parametrize(
+    "fields, expected",
+    [
+        ({"length": 12.5}, 12.5),
+        ({"distance": 18.4, "length": 0.00179515}, 18.4),
+        ({"distance": 9.25}, 9.25),
+        ({}, 0.0),
+        ({"distance": 0, "length": 12.5}, 0.0),
+    ],
+    ids=["length-only", "prefer-distance", "distance-only", "missing", "explicit-zero-distance"],
+)
+def test_normalize_length_miles(fields, expected) -> None:
+    # Live routes_segments uses `distance` (miles). OpenAPI still says `length`.
+    # An explicit distance=0 must not fall back to length.
+    assert normalize_routes([_seg(**fields)], "d")[0].length_miles == expected
 
 
 def test_upsert_route_meta_refreshes_length_without_clearing_engaged(tmp_path) -> None:
-    """Metadata backfill rewrites length_miles; cached qlog parses stay put."""
     with Cache(tmp_path / "c.sqlite") as cache:
-        cache.upsert_route_meta(_row(length_miles=0.0, qlog_parsed=False, engaged_time_s=None))
+        cache.upsert_route_meta(drive_row(length_miles=0.0, qlog_parsed=False, engaged_time_s=None))
         cache.save_engaged("d|r", 42.0, "selfdriveState.enabled", 80.0)
-        cache.upsert_route_meta(_row(length_miles=12.5, qlog_parsed=False, engaged_time_s=None))
+        cache.upsert_route_meta(drive_row(length_miles=12.5, qlog_parsed=False, engaged_time_s=None))
         row = cache.get_drive("d|r")
         assert row is not None
         assert row.length_miles == 12.5
@@ -295,17 +238,9 @@ def test_normalize_skips_empty_route_name() -> None:
 
 
 def test_verify_auth_401() -> None:
-    from op_usage.comma_api import CommaApiError, CommaClient
-
-    class _Resp:
-        status_code = 401
-        text = "unauthorized"
-        headers: dict = {}
-        ok = False
-
     class _Sess:
         def get(self, *args, **kwargs):
-            return _Resp()
+            return _Resp(401, text="unauthorized")
 
     client = CommaClient("jwt", "dongle", session=_Sess(), sleeper=lambda _s: None)
     try:
@@ -318,16 +253,6 @@ def test_verify_auth_401() -> None:
 
 
 def test_download_bytes_retries_server_error() -> None:
-    from op_usage.comma_api import CommaClient
-
-    class _Resp:
-        def __init__(self, status: int, content: bytes = b""):
-            self.status_code = status
-            self.text = ""
-            self.headers: dict = {}
-            self.ok = 200 <= status < 300
-            self.content = content
-
     class _Sess:
         def __init__(self) -> None:
             self.calls = 0

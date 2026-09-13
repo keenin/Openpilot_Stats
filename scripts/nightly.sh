@@ -1,6 +1,5 @@
 #!/usr/bin/env bash
-# Nightly: incremental fetch → cache → index.html → Cloudflare Pages.
-# Intended for the owner's Debian machine, not the browser.
+# Incremental fetch → HTML → Cloudflare Pages (Debian host, not the browser).
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
