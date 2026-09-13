@@ -1,19 +1,8 @@
 """SQLite cache: per-route metadata, engaged time, incremental watermark.
 
-Schema (see README for the same picture):
-
-  meta(key TEXT PK, value TEXT)
-    watermark_ms          max start_time_utc_ms of listed routes
-    last_run_iso
-    dongle_id
-    schema_version
-
-  drives(...) one row per route; engaged_time_s and not_in_park_time_s
-  are cached so old qlogs are never re-parsed once qlog_parsed=1 and the
-  route is outside the recheck window.
-
-  total_drive_time_s is API wall-clock (end-start). Engage % uses
-  not_in_park_time_s (qlog gear integral) after a parse.
+qlog_parsed=1 rows are not re-read unless they are in the recheck window
+or explicitly cleared. total_drive_time_s is API wall-clock; engage %
+uses not_in_park_time_s after a parse. Schema picture is in the README.
 """
 
 from __future__ import annotations
@@ -123,7 +112,7 @@ class Cache:
             self.set_meta("watermark_ms", str(ms))
 
     def mark_run(self) -> None:
-        self.set_meta("last_run_iso", datetime.now(timezone.utc).isoformat())
+        self.set_meta("last_run_iso", _now())
 
     def get_drive(self, route_name: str) -> DriveRow | None:
         row = self._conn.execute("SELECT * FROM drives WHERE route_name = ?", (route_name,)).fetchone()
@@ -131,69 +120,7 @@ class Cache:
 
     def upsert_route_meta(self, drive: DriveRow) -> None:
         """Insert or refresh comma API metadata. Does not clear cached qlog parse."""
-        existing = self.get_drive(drive.route_name)
-        if existing and existing.qlog_parsed:
-            self._conn.execute(
-                """
-                UPDATE drives SET
-                  dongle_id = ?, start_time_utc_ms = ?, end_time_utc_ms = ?,
-                  length_miles = ?, total_drive_time_s = ?,
-                  git_commit = ?, git_branch = ?, git_remote = ?,
-                  maxqlog = ?, updated_at = ?
-                WHERE route_name = ?
-                """,
-                (
-                    drive.dongle_id,
-                    drive.start_time_utc_ms,
-                    drive.end_time_utc_ms,
-                    drive.length_miles,
-                    drive.total_drive_time_s,
-                    drive.git_commit,
-                    drive.git_branch,
-                    drive.git_remote,
-                    drive.maxqlog,
-                    _now(),
-                    drive.route_name,
-                ),
-            )
-            return
-        self._conn.execute(
-            """
-            INSERT INTO drives (
-              route_name, dongle_id, start_time_utc_ms, end_time_utc_ms,
-              length_miles, total_drive_time_s, git_commit, git_branch, git_remote,
-              maxqlog, engaged_time_s, engaged_source, not_in_park_time_s,
-              qlog_parsed, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)
-            ON CONFLICT(route_name) DO UPDATE SET
-              dongle_id = excluded.dongle_id,
-              start_time_utc_ms = excluded.start_time_utc_ms,
-              end_time_utc_ms = excluded.end_time_utc_ms,
-              length_miles = excluded.length_miles,
-              total_drive_time_s = excluded.total_drive_time_s,
-              git_commit = excluded.git_commit,
-              git_branch = excluded.git_branch,
-              git_remote = excluded.git_remote,
-              maxqlog = excluded.maxqlog,
-              updated_at = excluded.updated_at
-            """,
-            (
-                drive.route_name,
-                drive.dongle_id,
-                drive.start_time_utc_ms,
-                drive.end_time_utc_ms,
-                drive.length_miles,
-                drive.total_drive_time_s,
-                drive.git_commit,
-                drive.git_branch,
-                drive.git_remote,
-                drive.maxqlog,
-                drive.engaged_time_s,
-                drive.engaged_source,
-                drive.not_in_park_time_s,
-                _now(),
-            ),
-        )
+        self._conn.execute(_UPSERT_ROUTE_SQL, _drive_values(drive, qlog_parsed=0))
 
     def save_engaged(
         self,
@@ -215,13 +142,8 @@ class Cache:
     def clear_engaged_parses(self, route_names: Iterable[str] | None = None) -> int:
         """Drop cached qlog results so the next fetch re-reads those routes.
 
-        Use after a parser fix: qlog_parsed=1 (including engaged_time_s=0 or
-        a NULL not_in_park_time_s) is otherwise skipped forever.
-
-        If route_names is given, only those rows are cleared — so
-        nightly --reparse-engaged cannot wipe history outside the fetch window.
-        Omit route_names to clear every drive (the SQL-equivalent documented
-        in the README).
+        qlog_parsed=1 (including zeros) is otherwise skipped forever. If
+        route_names is given, only those rows are cleared.
         """
         sql = """
             UPDATE drives SET
@@ -253,14 +175,12 @@ class Cache:
         “maxqlog grew” recheck never fires.
         """
         existing = self.get_drive(drive.route_name)
-        if existing is None:
+        if existing is None or not existing.qlog_parsed:
             return True
-        if not existing.qlog_parsed:
-            return True
-        in_flight = drive.start_time_utc_ms >= recheck_after_ms
-        if in_flight and _maxqlog_grew(existing.maxqlog, drive.maxqlog):
-            return True
-        return False
+        if drive.start_time_utc_ms < recheck_after_ms:
+            return False
+        old, new = existing.maxqlog, drive.maxqlog
+        return new is not None and (old is None or new > old)
 
     def iter_drives(self) -> Iterator[DriveRow]:
         for row in self._conn.execute("SELECT * FROM drives"):
@@ -270,32 +190,7 @@ class Cache:
         """Used by demo/fixtures — full replace, no comma API."""
         self._conn.execute("DELETE FROM drives")
         for drive in drives:
-            self._conn.execute(
-                """
-                INSERT INTO drives (
-                  route_name, dongle_id, start_time_utc_ms, end_time_utc_ms,
-                  length_miles, total_drive_time_s, git_commit, git_branch, git_remote,
-                  maxqlog, engaged_time_s, engaged_source, not_in_park_time_s,
-                  qlog_parsed, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)
-                """,
-                (
-                    drive.route_name,
-                    drive.dongle_id,
-                    drive.start_time_utc_ms,
-                    drive.end_time_utc_ms,
-                    drive.length_miles,
-                    drive.total_drive_time_s,
-                    drive.git_commit,
-                    drive.git_branch,
-                    drive.git_remote,
-                    drive.maxqlog,
-                    drive.engaged_time_s,
-                    drive.engaged_source,
-                    drive.not_in_park_time_s,
-                    _now(),
-                ),
-            )
+            self._conn.execute(_DRIVE_INSERT_SQL, _drive_values(drive, qlog_parsed=1))
         self._conn.commit()
 
     def commit(self) -> None:
@@ -306,15 +201,52 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _maxqlog_grew(old: int | None, new: int | None) -> bool:
-    if new is None:
-        return False
-    if old is None:
-        return True
-    return new > old
+_DRIVE_INSERT_SQL = """
+INSERT INTO drives (
+  route_name, dongle_id, start_time_utc_ms, end_time_utc_ms,
+  length_miles, total_drive_time_s, git_commit, git_branch, git_remote,
+  maxqlog, engaged_time_s, engaged_source, not_in_park_time_s,
+  qlog_parsed, updated_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+"""
+
+_UPSERT_ROUTE_SQL = _DRIVE_INSERT_SQL + """
+ON CONFLICT(route_name) DO UPDATE SET
+  dongle_id = excluded.dongle_id,
+  start_time_utc_ms = excluded.start_time_utc_ms,
+  end_time_utc_ms = excluded.end_time_utc_ms,
+  length_miles = excluded.length_miles,
+  total_drive_time_s = excluded.total_drive_time_s,
+  git_commit = excluded.git_commit,
+  git_branch = excluded.git_branch,
+  git_remote = excluded.git_remote,
+  maxqlog = excluded.maxqlog,
+  updated_at = excluded.updated_at
+"""
+
+
+def _drive_values(drive: DriveRow, qlog_parsed: int) -> tuple:
+    return (
+        drive.route_name,
+        drive.dongle_id,
+        drive.start_time_utc_ms,
+        drive.end_time_utc_ms,
+        drive.length_miles,
+        drive.total_drive_time_s,
+        drive.git_commit,
+        drive.git_branch,
+        drive.git_remote,
+        drive.maxqlog,
+        drive.engaged_time_s,
+        drive.engaged_source,
+        drive.not_in_park_time_s,
+        qlog_parsed,
+        _now(),
+    )
 
 
 def _row_to_drive(row: sqlite3.Row) -> DriveRow:
+    raw_park = row["not_in_park_time_s"]
     return DriveRow(
         route_name=row["route_name"],
         dongle_id=row["dongle_id"],
@@ -330,13 +262,5 @@ def _row_to_drive(row: sqlite3.Row) -> DriveRow:
         engaged_source=row["engaged_source"],
         qlog_parsed=bool(row["qlog_parsed"]),
         updated_at=row["updated_at"] or "",
-        not_in_park_time_s=_optional_float(row, "not_in_park_time_s"),
+        not_in_park_time_s=None if raw_park is None else float(raw_park),
     )
-
-
-def _optional_float(row: sqlite3.Row, key: str) -> float | None:
-    try:
-        raw = row[key]
-    except (IndexError, KeyError):
-        return None
-    return None if raw is None else float(raw)

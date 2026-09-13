@@ -7,6 +7,7 @@ import logging
 import os
 import subprocess
 import sys
+from dataclasses import replace
 from pathlib import Path
 
 from op_usage.cache import Cache
@@ -92,31 +93,24 @@ def main(argv: list[str] | None = None) -> int:
             path = generate_from_cache(settings, cache)
         print(f"wrote {path}")
         return 0
-    if args.cmd == "backfill":
+    if args.cmd in ("backfill", "nightly"):
         stats = run_pipeline(
             settings,
-            backfill=True,
+            backfill=args.cmd == "backfill",
             reparse_engaged=args.reparse_engaged,
             metadata_only=args.metadata_only,
         )
         extra = " metadata_only" if args.metadata_only else ""
-        print(
-            f"backfill listed={stats.routes_listed} parsed={stats.qlogs_parsed}"
-            f"{extra} → {stats.html_path}"
-        )
-        return 0
-    if args.cmd == "nightly":
-        stats = run_pipeline(
-            settings,
-            backfill=False,
-            reparse_engaged=args.reparse_engaged,
-            metadata_only=args.metadata_only,
-        )
-        extra = " metadata_only" if args.metadata_only else ""
-        print(
-            f"nightly listed={stats.routes_listed} parsed={stats.qlogs_parsed} "
-            f"cached_skip={stats.qlogs_skipped_cached}{extra} → {stats.html_path}"
-        )
+        if args.cmd == "backfill":
+            print(
+                f"backfill listed={stats.routes_listed} parsed={stats.qlogs_parsed}"
+                f"{extra} → {stats.html_path}"
+            )
+        else:
+            print(
+                f"nightly listed={stats.routes_listed} parsed={stats.qlogs_parsed} "
+                f"cached_skip={stats.qlogs_skipped_cached}{extra} → {stats.html_path}"
+            )
         return 0
     if args.cmd == "deploy":
         return _deploy(settings, dry_run=args.dry_run)
@@ -137,8 +131,6 @@ def _strip_verbose(argv: list[str]) -> tuple[list[str], bool]:
 
 
 def _with_overrides(settings, out: Path | None, cache: Path | None):
-    from dataclasses import replace
-
     updates = {}
     if out is not None:
         updates["site_dir"] = out.resolve()
