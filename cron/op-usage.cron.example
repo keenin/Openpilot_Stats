@@ -1,10 +1,4 @@
-# Install on the Debian machine (not in the browser).
-#   sudo cp cron/op-usage.cron.example /etc/cron.d/op-usage
-#   sudo chmod 644 /etc/cron.d/op-usage
-# Edit the user and path. Logs: /var/log/op-usage.log (create + chown)
-#
-# 03:00 America/Los_Angeles every night.
-
+# 03:00 America/Los_Angeles. sudo cp to /etc/cron.d/op-usage; edit user + path.
 SHELL=/bin/bash
 PATH=/usr/local/bin:/usr/bin:/bin
 CRON_TZ=America/Los_Angeles

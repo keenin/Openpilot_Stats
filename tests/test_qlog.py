@@ -6,6 +6,7 @@ import capnp
 
 from op_usage.qlog import (
     CONTROLS_SOURCE,
+    GEAR_SOURCE,
     SELFDRIVE_SOURCE,
     EnabledSample,
     encode_synthetic_qlog,
@@ -13,6 +14,7 @@ from op_usage.qlog import (
     extract_engaged_time,
     load_event_module,
     pick_source,
+    _gear_is_park,
     _load_stub_schema,
 )
 
@@ -98,7 +100,6 @@ def _load_schema(path: Path):
 
 
 def _samples(pattern: list[tuple[float, bool]], source: str = SELFDRIVE_SOURCE, dt: float = 1.0) -> list[EnabledSample]:
-    """pattern is (duration_s, enabled) spans, sampled every dt seconds."""
     out: list[EnabledSample] = []
     t = 0.0
     for duration, enabled in pattern:
@@ -110,18 +111,14 @@ def _samples(pattern: list[tuple[float, bool]], source: str = SELFDRIVE_SOURCE, 
     return out
 
 
-def test_integral_counts_enabled_spans_only() -> None:
+def test_integral_counts_enabled_spans_and_skips_gaps() -> None:
     samples = _samples([(10, True), (5, False), (8, True)])
-    # 10s engaged + 8s engaged
     assert abs(engaged_seconds(samples) - 18.0) < 1e-6
-
-
-def test_gaps_above_max_are_skipped() -> None:
-    samples = [
+    gap = [
         EnabledSample(0, True, SELFDRIVE_SOURCE),
         EnabledSample(int(20 * NS), True, SELFDRIVE_SOURCE),
     ]
-    assert engaged_seconds(samples, max_gap_s=5.0) == 0.0
+    assert engaged_seconds(gap, max_gap_s=5.0) == 0.0
 
 
 def test_selfdrive_state_wins_over_controls() -> None:
@@ -164,7 +161,6 @@ def test_stub_schema_keeps_valid_out_of_union() -> None:
 
 
 def test_stub_reads_cereal_like_selfdrive_state(tmp_path: Path) -> None:
-    """Real qlogs are written with cereal (valid @67 outside the union)."""
     schema = tmp_path / "cereal_like.capnp"
     _write_schema(schema, file_id=_CEREAL_LIKE_SS_ID, deprecated_group=False)
     writer = _load_schema(schema)
@@ -177,8 +173,7 @@ def test_stub_reads_cereal_like_selfdrive_state(tmp_path: Path) -> None:
         ss = msg.init("selfdriveState")
         ss.enabled = sample.enabled
         parts.append(msg.to_bytes())
-    blob = b"".join(parts)
-    result = extract_engaged_time(blob, event_mod=_load_stub_schema())
+    result = extract_engaged_time(b"".join(parts), event_mod=_load_stub_schema())
     assert result.source == SELFDRIVE_SOURCE
     assert result.sample_count == len(samples)
     assert abs(result.engaged_time_s - 3.0) < 1e-6
@@ -202,7 +197,6 @@ def test_stub_reads_cereal_like_controls_state_enabled_19(tmp_path: Path) -> Non
 
 
 def test_controls_deprecated_enabled_group(tmp_path: Path) -> None:
-    """Modern cereal exposes ControlsState.enabled as deprecated.enabled (@19)."""
     schema = tmp_path / "deprecated_cs.capnp"
     _write_schema(schema, file_id=_DEPRECATED_FILE_ID, deprecated_group=True)
     writer = _load_schema(schema)
@@ -215,11 +209,9 @@ def test_controls_deprecated_enabled_group(tmp_path: Path) -> None:
         cs.deprecated.enabled = sample.enabled
         parts.append(msg.to_bytes())
     blob = b"".join(parts)
-    # Same module for write+read: Python must follow deprecated.enabled.
     result = extract_engaged_time(blob, event_mod=writer)
     assert result.source == CONTROLS_SOURCE
     assert abs(result.engaged_time_s - 4.0) < 1e-6
-    # Wire-compatible with the stub's top-level enabled @19.
     via_stub = extract_engaged_time(blob, event_mod=_load_stub_schema())
     assert via_stub.source == CONTROLS_SOURCE
     assert abs(via_stub.engaged_time_s - 4.0) < 1e-6
@@ -231,3 +223,128 @@ def test_load_event_module_falls_back_to_stub() -> None:
     msg = mod.new_message()
     msg.init("selfdriveState").enabled = True
     assert msg.which() == "selfdriveState"
+
+
+def test_extract_not_in_park_from_synthetic_qlog() -> None:
+    engaged = _samples([(5.0, True)], source=SELFDRIVE_SOURCE)
+    gear = _samples([(3.0, False), (7.0, True)], source=GEAR_SOURCE)
+    result = extract_engaged_time(encode_synthetic_qlog(engaged + gear, compress=None))
+    assert result.source == SELFDRIVE_SOURCE
+    assert abs(result.engaged_time_s - 5.0) < 1e-6
+    assert result.gear_source == GEAR_SOURCE
+    assert result.not_in_park_time_s is not None
+    assert abs(result.not_in_park_time_s - 7.0) < 1e-6
+
+
+def test_extract_without_car_state_leaves_not_in_park_none() -> None:
+    result = extract_engaged_time(encode_synthetic_qlog(_samples([(2.0, True)]), compress=None))
+    assert result.not_in_park_time_s is None
+    assert result.gear_sample_count == 0
+
+
+def test_unknown_and_reverse_count_as_not_in_park() -> None:
+    event_cls = _load_stub_schema()
+
+    def _gear(mono_ns: int, name: str):
+        msg = event_cls.new_message()
+        msg.logMonoTime = mono_ns
+        msg.init("carState").gearShifter = name
+        return msg.to_bytes()
+
+    parts = [
+        _gear(0, "unknown"),
+        _gear(4 * NS, "reverse"),
+        _gear(9 * NS, "park"),
+        _gear(12 * NS, "drive"),
+        _gear(15 * NS, "drive"),
+    ]
+    result = extract_engaged_time(b"".join(parts), event_mod=event_cls)
+    assert result.gear_source == GEAR_SOURCE
+    # unknown 4s + reverse 5s + drive 3s = 12s; park 3s ignored
+    assert result.not_in_park_time_s is not None
+    assert abs(result.not_in_park_time_s - 12.0) < 1e-6
+
+
+def test_gear_is_park_matches_raw_and_name() -> None:
+    event_cls = _load_stub_schema()
+    park = event_cls.new_message()
+    park.init("carState").gearShifter = "park"
+    drive = event_cls.new_message()
+    drive.init("carState").gearShifter = "drive"
+    unknown = event_cls.new_message()
+    unknown.init("carState").gearShifter = "unknown"
+    assert _gear_is_park(park.carState.gearShifter) is True
+    assert _gear_is_park(drive.carState.gearShifter) is False
+    assert _gear_is_park(unknown.carState.gearShifter) is False
+    assert park.carState.gearShifter.raw == 1
+
+
+def test_stub_reads_cereal_like_car_state_gear(tmp_path: Path) -> None:
+    union = "\n".join(
+        "    carState @22 :CarState;"
+        if i == 22
+        else "    selfdriveState @130 :SelfdriveState;"
+        if i == 130
+        else f"    u{i} @{i} :Void;"
+        for i in range(1, 131)
+        if i != 67
+    )
+    schema = tmp_path / "cereal_like_gear.capnp"
+    schema.write_text(
+        f"""
+@0xaaaaaaaaaaaaaaa3;
+
+enum GearShifter {{
+  unknown @0;
+  park @1;
+  drive @2;
+  neutral @3;
+  reverse @4;
+}}
+
+struct CarState {{
+  errors @0 :AnyPointer;
+  vEgo @1 :Float32;
+  wheelSpeeds @2 :AnyPointer;
+  gas @3 :Float32;
+  gasPressed @4 :Bool;
+  brake @5 :Float32;
+  brakePressed @6 :Bool;
+  steeringAngleDeg @7 :Float32;
+  steeringTorque @8 :Float32;
+  steeringPressed @9 :Bool;
+  cruiseState @10 :AnyPointer;
+  buttonEvents @11 :AnyPointer;
+  canMonoTimes @12 :AnyPointer;
+  events @13 :AnyPointer;
+  gearShifter @14 :GearShifter;
+}}
+
+struct SelfdriveState {{
+  state @0 :UInt16;
+  enabled @1 :Bool;
+}}
+
+struct Event {{
+  logMonoTime @0 :UInt64;
+  valid @67 :Bool = true;
+  union {{
+{union}
+  }}
+}}
+""",
+        encoding="utf-8",
+    )
+    capnp.remove_import_hook()
+    writer = capnp.load(str(schema)).Event
+    parts: list[bytes] = []
+    for t, gear in [(0.0, "park"), (2.0, "drive"), (5.0, "drive"), (8.0, "drive")]:
+        msg = writer.new_message()
+        msg.logMonoTime = int(round(t * NS))
+        msg.valid = True
+        msg.init("carState").gearShifter = gear
+        parts.append(msg.to_bytes())
+    result = extract_engaged_time(b"".join(parts), event_mod=_load_stub_schema())
+    assert result.gear_source == GEAR_SOURCE
+    assert result.not_in_park_time_s is not None
+    assert abs(result.not_in_park_time_s - 6.0) < 1e-6

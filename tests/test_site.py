@@ -21,11 +21,9 @@ CHROME = (
 )
 
 
-def test_demo_html_lists_only_qualified_commits_newest_first() -> None:
-    drives = load_fixture_drives(FIXTURE)
-    commits = aggregate_commits(drives)
-    hashes = [c.short_hash for c in commits]
-    assert hashes == ["7c3a91b", "1e9d2c4", "0f1e2d3"]
+def test_demo_html_is_table_only_qualified_commits_newest_first() -> None:
+    commits = aggregate_commits(load_fixture_drives(FIXTURE))
+    assert [c.short_hash for c in commits] == ["7c3a91b", "1e9d2c4", "0f1e2d3"]
     html = render_site(
         commits,
         owner_name="fixture driver",
@@ -38,40 +36,24 @@ def test_demo_html_lists_only_qualified_commits_newest_first() -> None:
     assert "release-c3" in html
     assert "wip-two-drives" not in html
     assert "mixed-filters" not in html
+    assert html.index("nightly-togo") < html.index("experimental-long") < html.index("release-c3")
     assert 'title="7c3a91b0f2e44a1b9c0d1e2f3a4b5c6d7e8f9012"' in html
     assert "button" in html and "expand" in html
-    assert html.index("nightly-togo") < html.index("experimental-long") < html.index("release-c3")
     assert html.count("deadbeefcafebabe|") == 0
     assert "18.4" in html
-    assert "<th>Branch</th>" in html
-    assert "<th>Commit</th>" in html
-    assert "<th>Date range</th>" in html
-    assert "<th>Drives</th>" in html
-    assert "<th>Miles</th>" in html
-    assert "<th>Engaged time</th>" in html
+    for header in ("Branch", "Commit", "Date range", "Drives", "Miles", "Engaged time"):
+        assert f"<th>{header}</th>" in html
     assert "Engage %" in html
     assert "Updated 2026-09-11 03:00 PDT" in html
+    assert "<table class=\"nested\">" in html
+    assert "2026-09-10" in html
+    assert 'colspan="7"' in html
     for blob in CHROME:
         assert blob not in html
     assert "<title>Openpilot Stats</title>" in html
     assert "<h1" not in html
     assert "banner" not in html
     assert "<header" not in html
-
-
-def test_expand_rows_include_drive_date_miles_pct() -> None:
-    commits = aggregate_commits(load_fixture_drives(FIXTURE))
-    html = render_site(
-        commits,
-        owner_name="x",
-        generated_at=datetime.now(timezone.utc),
-        display_tz="America/Los_Angeles",
-        mode="demo",
-    )
-    assert "<table class=\"nested\">" in html
-    assert "Engage %" in html
-    assert "2026-09-10" in html
-    assert 'colspan="7"' in html
 
 
 def test_helpers() -> None:

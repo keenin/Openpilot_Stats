@@ -3,12 +3,11 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from pathlib import Path
 
+from helpers import drive_row
 from op_usage.cache import Cache
 from op_usage.config import Settings
 from op_usage.pipeline import run_pipeline
 from op_usage.qlog import EnabledSample, GEAR_SOURCE, SELFDRIVE_SOURCE, encode_synthetic_qlog
-
-from test_cache_and_api import _row
 
 NS = 1_000_000_000
 
@@ -65,6 +64,13 @@ def _settings(tmp_path: Path) -> Settings:
     )
 
 
+def _seed(cache: Cache, route_name: str, *, engaged: float, not_in_park: float | None = None, **meta) -> None:
+    cache.upsert_route_meta(
+        drive_row(route_name=route_name, qlog_parsed=False, engaged_time_s=None, **meta)
+    )
+    cache.save_engaged(route_name, engaged, "selfdriveState.enabled", not_in_park)
+
+
 def test_metadata_only_refreshes_length_without_qlogs(tmp_path, monkeypatch) -> None:
     fake = _FakeClient()
     monkeypatch.setattr("op_usage.pipeline.CommaClient", lambda **kwargs: fake)
@@ -74,16 +80,13 @@ def test_metadata_only_refreshes_length_without_qlogs(tmp_path, monkeypatch) -> 
     )
     settings = _settings(tmp_path)
     with Cache(settings.cache_path) as cache:
-        cache.upsert_route_meta(
-            _row(
-                route_name=ROUTE["fullname"],
-                dongle_id=ROUTE["dongle_id"],
-                length_miles=0.0,
-                qlog_parsed=False,
-                engaged_time_s=None,
-            )
+        _seed(
+            cache,
+            ROUTE["fullname"],
+            engaged=12509.5,
+            dongle_id=ROUTE["dongle_id"],
+            length_miles=0.0,
         )
-        cache.save_engaged(ROUTE["fullname"], 12509.5, "selfdriveState.enabled")
         cache.commit()
 
     stats = run_pipeline(settings, backfill=True, metadata_only=True)
@@ -101,26 +104,9 @@ def test_metadata_only_refreshes_length_without_qlogs(tmp_path, monkeypatch) -> 
     assert (settings.site_dir / "index.html").is_file()
 
 
-def test_metadata_only_rejects_reparse() -> None:
-    settings = Settings(
-        comma_jwt="jwt",
-        dongle_id="d",
-        api_base="https://example.invalid",
-        cache_path=Path("/tmp/unused.sqlite"),
-        site_dir=Path("/tmp/unused-site"),
-        display_tz="UTC",
-        owner_name="t",
-        backfill_start="2026-09-01",
-        openpilot_path=None,
-        cereal_path=None,
-        cf_pages_project="op-usage",
-        chunk_days=30,
-        recheck_hours=24,
-        files_min_interval_s=13,
-        request_timeout_s=60,
-    )
+def test_metadata_only_rejects_reparse(tmp_path) -> None:
     try:
-        run_pipeline(settings, backfill=True, metadata_only=True, reparse_engaged=True)
+        run_pipeline(_settings(tmp_path), backfill=True, metadata_only=True, reparse_engaged=True)
     except SystemExit as exc:
         assert "--metadata-only cannot be combined with --reparse-engaged" in str(exc)
     else:
@@ -172,18 +158,16 @@ def test_nightly_reparses_when_maxqlog_grows(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr("op_usage.pipeline.CommaClient", lambda **kwargs: fake)
     settings = _settings(tmp_path)
     with Cache(settings.cache_path) as cache:
-        cache.upsert_route_meta(
-            _row(
-                route_name=route["fullname"],
-                dongle_id=route["dongle_id"],
-                start_time_utc_ms=start_ms,
-                end_time_utc_ms=now_ms,
-                maxqlog=1,
-                qlog_parsed=False,
-                engaged_time_s=None,
-            )
+        _seed(
+            cache,
+            route["fullname"],
+            engaged=99.0,
+            not_in_park=80.0,
+            dongle_id=route["dongle_id"],
+            start_time_utc_ms=start_ms,
+            end_time_utc_ms=now_ms,
+            maxqlog=1,
         )
-        cache.save_engaged(route["fullname"], 99.0, "selfdriveState.enabled", 80.0)
         cache.set_watermark_ms(start_ms)
         cache.commit()
 
@@ -204,25 +188,15 @@ def test_nightly_reparse_does_not_wipe_unlisted_history(tmp_path, monkeypatch) -
     settings = _settings(tmp_path)
     hist_name = "deadbeefcafebabe|historical"
     with Cache(settings.cache_path) as cache:
-        cache.upsert_route_meta(
-            _row(
-                route_name=ROUTE["fullname"],
-                dongle_id=ROUTE["dongle_id"],
-                qlog_parsed=False,
-                engaged_time_s=None,
-            )
+        _seed(cache, ROUTE["fullname"], engaged=1.0, not_in_park=2.0, dongle_id=ROUTE["dongle_id"])
+        _seed(
+            cache,
+            hist_name,
+            engaged=42.0,
+            not_in_park=50.0,
+            dongle_id=ROUTE["dongle_id"],
+            start_time_utc_ms=1_000,
         )
-        cache.save_engaged(ROUTE["fullname"], 1.0, "selfdriveState.enabled", 2.0)
-        cache.upsert_route_meta(
-            _row(
-                route_name=hist_name,
-                dongle_id=ROUTE["dongle_id"],
-                start_time_utc_ms=1_000,
-                qlog_parsed=False,
-                engaged_time_s=None,
-            )
-        )
-        cache.save_engaged(hist_name, 42.0, "selfdriveState.enabled", 50.0)
         cache.set_watermark_ms(int(datetime.now(timezone.utc).timestamp() * 1000))
         cache.commit()
 
