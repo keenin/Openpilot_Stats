@@ -86,10 +86,18 @@ def commit_url(remote: str, full_hash: str) -> str | None:
     return f"https://github.com/{matched.group(1)}/commit/{full_hash}"
 
 
+def _hash_title(commit: CommitRow) -> str:
+    last = commit.git_commit
+    first = commit.era_first_commit or last
+    if first and last and first.lower() != last.lower():
+        return f"{first} … {last}"
+    return last
+
+
 def _commit_block(commit: CommitRow, tz: ZoneInfo) -> str:
     url = commit_url(commit.git_remote, commit.git_commit)
     short = html.escape(commit.short_hash)
-    full = html.escape(commit.git_commit)
+    full = html.escape(_hash_title(commit))
     if url:
         hash_html = (
             f'<a class="hash" href="{html.escape(url)}" title="{full}" '

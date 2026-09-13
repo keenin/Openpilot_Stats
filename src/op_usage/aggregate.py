@@ -1,20 +1,24 @@
 """Filters, commit grouping, and sort.
 
 A drive is included only if length >= 1 mile AND engaged time > 0.
-A commit appears only if it has >= 3 qualifying drives.
-Commits sort by last qualifying drive (newest first) — never by engage %.
+A group appears only if it has >= 3 qualifying drives.
+Groups sort by last qualifying drive (newest first) — never by engage %.
 
-Engage % = engaged_time_s / not_in_park_time_s (qlog gear integral).
-Falls back to API wall-clock total_drive_time_s if not_in_park_time_s
-has not been parsed yet.
+Non-master branches: one row per SHA.
+master: consecutive SHAs that share a driving-weights fingerprint are
+one row (UI/car/CI commits do not split). Unknown fingerprints stay
+per-SHA. Engage % = engaged / not_in_park (wall-clock fallback).
 """
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
 
 from op_usage import MIN_DRIVES_PER_COMMIT, MIN_MILES
 from op_usage.cache import DriveRow
+
+WeightsLookup = Callable[[str, str], str | None]
 
 
 @dataclass
@@ -44,6 +48,7 @@ class CommitRow:
     engaged_time_s: float
     not_in_park_time_s: float
     drives: list[DriveView] = field(default_factory=list)
+    era_first_commit: str = ""
 
     @property
     def engage_pct(self) -> float:
@@ -51,7 +56,11 @@ class CommitRow:
 
     @property
     def short_hash(self) -> str:
-        return self.git_commit[:7] if self.git_commit else "unknown"
+        last = (self.git_commit or "")[:7] or "unknown"
+        first = (self.era_first_commit or self.git_commit or "")[:7]
+        if first and first != last:
+            return f"{first}…{last}"
+        return last
 
 
 def _engage_pct(engaged: float, denom: float) -> float:
@@ -84,36 +93,82 @@ def to_drive_view(drive: DriveRow) -> DriveView:
     )
 
 
+def is_master_branch(branch: str) -> bool:
+    return (branch or "").strip().lower() == "master"
+
+
 def aggregate_commits(
     drives: list[DriveRow],
     min_miles: float = MIN_MILES,
     min_drives: int = MIN_DRIVES_PER_COMMIT,
+    weights_lookup: WeightsLookup | None = None,
 ) -> list[CommitRow]:
     qualifying = [d for d in drives if qualifies(d, min_miles=min_miles)]
-    by_commit: dict[str, list[DriveRow]] = {}
-    for drive in qualifying:
-        by_commit.setdefault(drive.git_commit.lower(), []).append(drive)
-
-    rows: list[CommitRow] = []
-    for commit, group in by_commit.items():
-        if len(group) < min_drives:
-            continue
-        group.sort(key=lambda d: d.start_time_utc_ms)
-        last = group[-1]
-        rows.append(
-            CommitRow(
-                git_commit=group[0].git_commit or commit,
-                git_branch=last.git_branch or "(unknown)",
-                git_remote=last.git_remote or "",
-                first_drive_ms=group[0].start_time_utc_ms,
-                last_drive_ms=last.start_time_utc_ms,
-                drive_count=len(group),
-                total_miles=sum(d.length_miles for d in group),
-                engaged_time_s=sum(float(d.engaged_time_s or 0.0) for d in group),
-                not_in_park_time_s=sum(denominator_s(d) for d in group),
-                drives=[to_drive_view(d) for d in group],
-            )
-        )
-
+    groups = _sha_groups(d for d in qualifying if not is_master_branch(d.git_branch))
+    groups.extend(_master_eras(
+        [d for d in qualifying if is_master_branch(d.git_branch)],
+        weights_lookup,
+    ))
+    rows = [_commit_row(group) for group in groups if len(group) >= min_drives]
     rows.sort(key=lambda r: r.last_drive_ms, reverse=True)
     return rows
+
+
+def _sha_groups(drives) -> list[list[DriveRow]]:
+    by_commit: dict[str, list[DriveRow]] = {}
+    for drive in drives:
+        by_commit.setdefault(drive.git_commit.lower(), []).append(drive)
+    return list(by_commit.values())
+
+
+def _master_eras(
+    drives: list[DriveRow],
+    weights_lookup: WeightsLookup | None,
+) -> list[list[DriveRow]]:
+    if not drives:
+        return []
+    by_sha: dict[str, list[DriveRow]] = {}
+    first_ms: dict[str, int] = {}
+    for drive in drives:
+        key = drive.git_commit.lower()
+        by_sha.setdefault(key, []).append(drive)
+        first_ms[key] = min(first_ms.get(key, drive.start_time_utc_ms), drive.start_time_utc_ms)
+    eras: list[list[str]] = []
+    prev_fp: str | None = None
+    for sha in sorted(by_sha, key=lambda s: first_ms[s]):
+        sample = by_sha[sha][0]
+        fp = weights_lookup(sample.git_commit, sample.git_remote) if weights_lookup else None
+        if fp is not None and fp == prev_fp:
+            eras[-1].append(sha)
+        else:
+            eras.append([sha])
+        prev_fp = fp
+    return [[d for sha in shas for d in by_sha[sha]] for shas in eras]
+
+
+def _commit_row(group: list[DriveRow]) -> CommitRow:
+    group = sorted(group, key=lambda d: d.start_time_utc_ms)
+    last = group[-1]
+    seen: list[str] = []
+    seen_l: set[str] = set()
+    for drive in group:
+        sha = drive.git_commit
+        key = sha.lower()
+        if sha and key not in seen_l:
+            seen.append(sha)
+            seen_l.add(key)
+    first_sha = seen[0] if seen else last.git_commit
+    last_sha = seen[-1] if seen else last.git_commit
+    return CommitRow(
+        git_commit=last_sha or first_sha,
+        git_branch=last.git_branch or "(unknown)",
+        git_remote=last.git_remote or "",
+        first_drive_ms=group[0].start_time_utc_ms,
+        last_drive_ms=last.start_time_utc_ms,
+        drive_count=len(group),
+        total_miles=sum(d.length_miles for d in group),
+        engaged_time_s=sum(float(d.engaged_time_s or 0.0) for d in group),
+        not_in_park_time_s=sum(denominator_s(d) for d in group),
+        drives=[to_drive_view(d) for d in group],
+        era_first_commit=first_sha,
+    )

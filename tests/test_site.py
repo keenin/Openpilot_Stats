@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from pathlib import Path
 
+from helpers import drive_row
 from op_usage.aggregate import aggregate_commits
 from op_usage.pipeline import load_fixture_drives
 from op_usage.site import commit_url, format_duration, format_pct, render_site
@@ -64,4 +65,33 @@ def test_helpers() -> None:
     )
     assert commit_url("https://github.com/foo/bar.git", "deadbeef") == (
         "https://github.com/foo/bar/commit/deadbeef"
+    )
+
+
+def test_master_era_hash_is_first_last_without_new_chrome() -> None:
+    drives = [
+        drive_row(
+            route_name=f"m{i}",
+            git_commit="aaaaaaa111111111111111111111111111111111" if i < 2 else "bbbbbbb222222222222222222222222222222222",
+            git_branch="master",
+            git_remote="git@github.com:commaai/openpilot.git",
+            start_time_utc_ms=1000 + i,
+        )
+        for i in range(3)
+    ]
+    commits = aggregate_commits(drives, weights_lookup=lambda c, r: "era")
+    assert len(commits) == 1
+    html = render_site(
+        commits,
+        owner_name="x",
+        generated_at=datetime.now(timezone.utc),
+        display_tz="UTC",
+        mode="live",
+    )
+    assert "aaaaaaa…bbbbbbb" in html
+    assert "master" in html
+    assert "<h1" not in html
+    assert "weights era" not in html
+    assert commit_url(commits[0].git_remote, commits[0].git_commit).endswith(
+        "/commit/bbbbbbb222222222222222222222222222222222"
     )

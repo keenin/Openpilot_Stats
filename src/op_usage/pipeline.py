@@ -18,6 +18,7 @@ from op_usage.comma_api import CommaClient, RouteMeta, iter_time_chunks, normali
 from op_usage.config import Settings
 from op_usage.qlog import extract_engaged_time_from_qlogs, load_event_module
 from op_usage.site import render_site, write_site
+from op_usage.weights import make_weights_lookup
 
 log = logging.getLogger(__name__)
 
@@ -31,7 +32,7 @@ class RunStats:
 
 
 def generate_from_cache(settings: Settings, cache: Cache, mode: str = "live") -> Path:
-    commits = aggregate_commits(list(cache.iter_drives()))
+    commits = aggregate_commits(list(cache.iter_drives()), weights_lookup=make_weights_lookup(cache))
     html = render_site(
         commits,
         owner_name=settings.owner_name,
