@@ -179,11 +179,10 @@ class Cache:
             )
         return int(cur.rowcount or 0)
 
-    def needs_qlog_parse(self, drive: DriveRow, recheck_after_ms: int = 0) -> bool:
+    def needs_qlog_parse(self, drive: DriveRow) -> bool:
         """True if incoming API metadata still needs a qlog download.
 
         Parse only when the row is unparsed or incoming maxqlog grew.
-        `recheck_after_ms` is unused (listing uses end-time, not parse).
         `drive` must be the *new* listing, compared before upsert_route_meta.
         """
         existing = self.get_drive(drive.route_name)
@@ -274,6 +273,12 @@ INSERT INTO drives (
 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 """
 
+# Last-known-good: blank incoming git_* does not clobber a cached value.
+_KEEP_NONEMPTY = (
+    "CASE WHEN excluded.{0} IS NOT NULL AND TRIM(excluded.{0}) != '' "
+    "THEN excluded.{0} ELSE drives.{0} END"
+)
+
 _UPSERT_ROUTE_SQL = _DRIVE_INSERT_SQL + f"""
 ON CONFLICT(route_name) DO UPDATE SET
   dongle_id = excluded.dongle_id,
@@ -286,21 +291,9 @@ ON CONFLICT(route_name) DO UPDATE SET
     ELSE drives.length_miles
   END,
   total_drive_time_s = excluded.total_drive_time_s,
-  git_commit = CASE
-    WHEN excluded.git_commit IS NOT NULL AND TRIM(excluded.git_commit) != ''
-    THEN excluded.git_commit
-    ELSE drives.git_commit
-  END,
-  git_branch = CASE
-    WHEN excluded.git_branch IS NOT NULL AND TRIM(excluded.git_branch) != ''
-    THEN excluded.git_branch
-    ELSE drives.git_branch
-  END,
-  git_remote = CASE
-    WHEN excluded.git_remote IS NOT NULL AND TRIM(excluded.git_remote) != ''
-    THEN excluded.git_remote
-    ELSE drives.git_remote
-  END,
+  git_commit = {_KEEP_NONEMPTY.format("git_commit")},
+  git_branch = {_KEEP_NONEMPTY.format("git_branch")},
+  git_remote = {_KEEP_NONEMPTY.format("git_remote")},
   maxqlog = excluded.maxqlog,
   updated_at = excluded.updated_at
 """

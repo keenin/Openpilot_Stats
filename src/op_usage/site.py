@@ -3,26 +3,20 @@
 from __future__ import annotations
 
 import html
-import re
 from datetime import datetime, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from op_usage.aggregate import CommitRow, DriveView
-
-GITHUB_SSH = re.compile(r"^git@github\.com:(.+?)(?:\.git)?$")
-GITHUB_HTTPS = re.compile(r"^https://github\.com/(.+?)(?:\.git)?$")
+from op_usage.weights import github_owner_repo
 
 
 def render_site(
     commits: list[CommitRow],
     *,
-    owner_name: str,
     generated_at: datetime,
     display_tz: str,
-    mode: str = "live",
 ) -> str:
-    del owner_name, mode  # not shown; page is table + last-updated only
     tz = ZoneInfo(display_tz)
     generated_local = generated_at.astimezone(tz)
     stamp = generated_local.strftime("%Y-%m-%d %H:%M %Z")
@@ -78,12 +72,12 @@ def _local(ms: int, tz: ZoneInfo) -> datetime:
 
 
 def commit_url(remote: str, full_hash: str) -> str | None:
-    if not remote or not full_hash:
+    if not full_hash:
         return None
-    matched = GITHUB_SSH.match(remote.strip()) or GITHUB_HTTPS.match(remote.strip())
-    if not matched:
+    repo = github_owner_repo(remote)
+    if not repo:
         return None
-    return f"https://github.com/{matched.group(1)}/commit/{full_hash}"
+    return f"https://github.com/{repo}/commit/{full_hash}"
 
 
 def _hash_title(commit: CommitRow) -> str:

@@ -27,10 +27,8 @@ def test_demo_html_is_table_only_qualified_commits_newest_first() -> None:
     assert [c.short_hash for c in commits] == ["7c3a91b", "1e9d2c4", "0f1e2d3"]
     html = render_site(
         commits,
-        owner_name="fixture driver",
         generated_at=datetime(2026, 9, 11, 10, 0, tzinfo=timezone.utc),
         display_tz="America/Los_Angeles",
-        mode="demo",
     )
     assert "nightly-togo" in html
     assert "experimental-long" in html
@@ -83,10 +81,8 @@ def test_master_era_hash_is_first_last_without_new_chrome() -> None:
     assert len(commits) == 1
     html = render_site(
         commits,
-        owner_name="x",
         generated_at=datetime.now(timezone.utc),
         display_tz="UTC",
-        mode="live",
     )
     assert "aaaaaaa…bbbbbbb" in html
     assert "master" in html

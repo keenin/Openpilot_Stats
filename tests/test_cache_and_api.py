@@ -106,7 +106,7 @@ def test_clear_engaged_parses_allows_reparse(tmp_path) -> None:
         assert existing and existing.qlog_parsed
         assert existing.engaged_time_s == 0.0
         assert existing.not_in_park_time_s == 50.0
-        assert cache.needs_qlog_parse(drive_row(maxqlog=1), recheck_after_ms=10_000) is False
+        assert cache.needs_qlog_parse(drive_row(maxqlog=1)) is False
         n = cache.clear_engaged_parses()
         assert n == 1
         cleared = cache.get_drive("d|r")
@@ -114,7 +114,7 @@ def test_clear_engaged_parses_allows_reparse(tmp_path) -> None:
         assert cleared.engaged_time_s is None
         assert cleared.engaged_source is None
         assert cleared.not_in_park_time_s is None
-        assert cache.needs_qlog_parse(drive_row(maxqlog=1), recheck_after_ms=10_000) is True
+        assert cache.needs_qlog_parse(drive_row(maxqlog=1)) is True
 
 
 def test_parsed_qlog_not_redone_outside_recheck(tmp_path) -> None:
@@ -123,11 +123,11 @@ def test_parsed_qlog_not_redone_outside_recheck(tmp_path) -> None:
         cache.save_engaged("d|r", 12.5, "selfdriveState.enabled")
         existing = cache.get_drive("d|r")
         assert existing and existing.qlog_parsed
-        assert cache.needs_qlog_parse(drive_row(maxqlog=1), recheck_after_ms=10_000) is False
+        assert cache.needs_qlog_parse(drive_row(maxqlog=1)) is False
         in_window = drive_row(start_time_utc_ms=20_000, maxqlog=4)
         cache.upsert_route_meta(drive_row(start_time_utc_ms=20_000, maxqlog=1, qlog_parsed=True))
         cache.save_engaged("d|r", 12.5, "selfdriveState.enabled")
-        assert cache.needs_qlog_parse(in_window, recheck_after_ms=15_000) is True
+        assert cache.needs_qlog_parse(in_window) is True
 
 
 def test_needs_qlog_parse_when_maxqlog_grows_even_if_start_is_old(tmp_path) -> None:
@@ -135,9 +135,9 @@ def test_needs_qlog_parse_when_maxqlog_grows_even_if_start_is_old(tmp_path) -> N
         cache.upsert_route_meta(drive_row(start_time_utc_ms=1_000, end_time_utc_ms=2_000, maxqlog=1))
         cache.save_engaged("d|r", 12.5, "selfdriveState.enabled")
         grown = drive_row(start_time_utc_ms=1_000, end_time_utc_ms=2_000, maxqlog=4)
-        assert cache.needs_qlog_parse(grown, recheck_after_ms=10_000) is True
+        assert cache.needs_qlog_parse(grown) is True
         same = drive_row(start_time_utc_ms=1_000, end_time_utc_ms=2_000, maxqlog=1)
-        assert cache.needs_qlog_parse(same, recheck_after_ms=10_000) is False
+        assert cache.needs_qlog_parse(same) is False
 
 
 def test_needs_qlog_parse_does_not_reparse_when_maxqlog_unchanged(tmp_path) -> None:
@@ -145,7 +145,7 @@ def test_needs_qlog_parse_does_not_reparse_when_maxqlog_unchanged(tmp_path) -> N
         cache.upsert_route_meta(drive_row(start_time_utc_ms=1_000, end_time_utc_ms=20_000, maxqlog=1))
         cache.save_engaged("d|r", 12.5, "selfdriveState.enabled")
         recent = drive_row(start_time_utc_ms=1_000, end_time_utc_ms=20_000, maxqlog=1)
-        assert cache.needs_qlog_parse(recent, recheck_after_ms=15_000) is False
+        assert cache.needs_qlog_parse(recent) is False
 
 
 def test_upsert_does_not_blank_git_or_zero_length(tmp_path) -> None:

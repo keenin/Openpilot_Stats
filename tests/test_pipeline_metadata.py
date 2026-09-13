@@ -65,7 +65,6 @@ def _settings(tmp_path: Path) -> Settings:
         cache_path=tmp_path / "c.sqlite",
         site_dir=tmp_path / "site",
         display_tz="UTC",
-        owner_name="t",
         backfill_start="2026-09-01",
         openpilot_path=None,
         cereal_path=None,
