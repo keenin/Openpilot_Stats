@@ -9,7 +9,6 @@ from op_usage.pipeline import load_fixture_drives
 from op_usage.site import commit_url, format_duration, format_pct, render_site
 
 FIXTURE = Path(__file__).resolve().parents[1] / "fixtures" / "drives.json"
-
 CHROME = (
     "Personal engaged-time",
     "Private drives only",
