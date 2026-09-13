@@ -4,8 +4,58 @@ from pathlib import Path
 
 from op_usage.cache import Cache
 from op_usage.cli import main
+from op_usage.config import default_cache_path, default_site_dir
 
 FIXTURE = Path(__file__).resolve().parents[1] / "fixtures" / "drives.json"
+
+
+def test_demo_cli_refuses_live_cache(tmp_path) -> None:
+    try:
+        main(
+            [
+                "demo",
+                "--fixture",
+                str(FIXTURE),
+                "--out",
+                str(tmp_path / "site"),
+                "--cache",
+                str(default_cache_path()),
+            ]
+        )
+    except SystemExit as exc:
+        assert "live cache" in str(exc)
+        assert not default_cache_path().is_file()
+    else:
+        raise AssertionError("expected SystemExit")
+
+
+def test_demo_cli_refuses_live_site(tmp_path) -> None:
+    try:
+        main(
+            [
+                "demo",
+                "--fixture",
+                str(FIXTURE),
+                "--out",
+                str(default_site_dir()),
+                "--cache",
+                str(tmp_path / "demo.sqlite"),
+            ]
+        )
+    except SystemExit as exc:
+        assert "live site" in str(exc)
+    else:
+        raise AssertionError("expected SystemExit")
+    assert not (default_site_dir() / "index.html").is_file()
+
+
+def test_demo_cli_defaults_to_temp_paths() -> None:
+    live_cache = default_cache_path()
+    existed = live_cache.is_file()
+    rc = main(["demo", "--fixture", str(FIXTURE)])
+    assert rc == 0
+    if not existed:
+        assert not live_cache.is_file()
 
 
 def test_demo_cli_writes_index(tmp_path) -> None:

@@ -130,6 +130,95 @@ def test_parsed_qlog_not_redone_outside_recheck(tmp_path) -> None:
         assert cache.needs_qlog_parse(in_window, recheck_after_ms=15_000) is True
 
 
+def test_needs_qlog_parse_when_maxqlog_grows_even_if_start_is_old(tmp_path) -> None:
+    with Cache(tmp_path / "c.sqlite") as cache:
+        cache.upsert_route_meta(drive_row(start_time_utc_ms=1_000, end_time_utc_ms=2_000, maxqlog=1))
+        cache.save_engaged("d|r", 12.5, "selfdriveState.enabled")
+        grown = drive_row(start_time_utc_ms=1_000, end_time_utc_ms=2_000, maxqlog=4)
+        assert cache.needs_qlog_parse(grown, recheck_after_ms=10_000) is True
+        same = drive_row(start_time_utc_ms=1_000, end_time_utc_ms=2_000, maxqlog=1)
+        assert cache.needs_qlog_parse(same, recheck_after_ms=10_000) is False
+
+
+def test_needs_qlog_parse_does_not_reparse_when_maxqlog_unchanged(tmp_path) -> None:
+    with Cache(tmp_path / "c.sqlite") as cache:
+        cache.upsert_route_meta(drive_row(start_time_utc_ms=1_000, end_time_utc_ms=20_000, maxqlog=1))
+        cache.save_engaged("d|r", 12.5, "selfdriveState.enabled")
+        recent = drive_row(start_time_utc_ms=1_000, end_time_utc_ms=20_000, maxqlog=1)
+        assert cache.needs_qlog_parse(recent, recheck_after_ms=15_000) is False
+
+
+def test_upsert_does_not_blank_git_or_zero_length(tmp_path) -> None:
+    with Cache(tmp_path / "c.sqlite") as cache:
+        cache.upsert_route_meta(
+            drive_row(
+                length_miles=12.5,
+                git_commit="abcabcabc",
+                git_branch="nightly",
+                git_remote="git@github.com:commaai/openpilot.git",
+            )
+        )
+        cache.upsert_route_meta(
+            drive_row(
+                length_miles=0.001,
+                git_commit="",
+                git_branch="",
+                git_remote="",
+                maxqlog=9,
+            )
+        )
+        row = cache.get_drive("d|r")
+        assert row is not None
+        assert row.length_miles == 12.5
+        assert row.git_commit == "abcabcabc"
+        assert row.git_branch == "nightly"
+        assert row.git_remote == "git@github.com:commaai/openpilot.git"
+        assert row.maxqlog == 9
+
+
+def test_settling_start_ignores_ancient_unparsed(tmp_path) -> None:
+    with Cache(tmp_path / "c.sqlite") as cache:
+        cache.upsert_route_meta(
+            drive_row(route_name="done", start_time_utc_ms=1, end_time_utc_ms=2, maxqlog=1)
+        )
+        cache.save_engaged("done", 1.0, "selfdriveState.enabled")
+        cache.upsert_route_meta(
+            drive_row(
+                route_name="unparsed-2018",
+                start_time_utc_ms=50,
+                end_time_utc_ms=60,
+                qlog_parsed=False,
+                engaged_time_s=None,
+            )
+        )
+        cache.upsert_route_meta(
+            drive_row(route_name="inflight", start_time_utc_ms=80, end_time_utc_ms=20_000, maxqlog=1)
+        )
+        cache.save_engaged("inflight", 2.0, "selfdriveState.enabled")
+        assert cache.earliest_settling_start_ms(15_000) == 80
+        assert cache.late_upload_starts(since_ms=0, recheck_after_ms=15_000) == [1, 50]
+
+
+def test_replace_all_refuses_live_cache(tmp_path, monkeypatch) -> None:
+    from pathlib import Path
+
+    path = tmp_path / "live.sqlite"
+    monkeypatch.setattr(
+        "op_usage.cache.is_live_cache_path",
+        lambda p: Path(p).resolve() == path.resolve(),
+    )
+    with Cache(path) as cache:
+        cache.upsert_route_meta(drive_row())
+        cache.commit()
+        try:
+            cache.replace_all([])
+        except RuntimeError as exc:
+            assert "live cache" in str(exc)
+        else:
+            raise AssertionError("expected RuntimeError")
+        assert cache.get_drive("d|r") is not None
+
+
 def test_normalize_route_times_and_git() -> None:
     payload = [
         _seg(

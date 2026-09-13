@@ -16,7 +16,7 @@ Debian box (cron 03:00 PT)
 - **Include a drive** only if length ≥ 1 mile **and** engaged time > 0.
 - **List a group** only if it has ≥ 3 qualifying drives.
 - **Other branches:** one row per git SHA.
-- **`master` only:** consecutive SHAs that share the same driving-model weights are one row. Weights are the blob SHAs of driving ONNX/pkl files under `selfdrive/modeld/models` (or `openpilot/selfdrive/modeld/models`); resolved via the GitHub contents API from each drive’s `git_commit` + `git_remote`, then cached in sqlite. UI / cars / CI commits do not split the group — only a weights change does. The Commit cell is the last SHA in the era (tooltip: first … last) so you can map it back to openpilot history. Optional `GITHUB_TOKEN` in credentials.env raises the GitHub rate limit; without it, unknown SHAs stay one-row-per-SHA.
+- **`master` only** (`master`, `origin/master`, `refs/heads/master`): walk qualifying drives in start-time order and split when the driving-model weights fingerprint changes. A SHA that reappears after a different fingerprint is a **new interval**. Weights are the blob SHAs of driving ONNX/pkl files under `selfdrive/modeld/models` (then the older `openpilot/selfdrive/modeld/models` layout); resolved via the GitHub contents API from each drive’s `git_commit` + `git_remote`, then cached in sqlite (including confirmed misses). UI / cars / CI commits do not split the group — only a weights change does. Unknown fingerprints stay one-row-per-interval (never merged together). The Commit cell is the last SHA in the era (tooltip: first … last). Optional `GITHUB_TOKEN` in credentials.env raises the GitHub rate limit.
 - **Sort** by date of the last qualifying drive, newest first (not by engage %).
 - **Engage %** = `engaged_time / not_in_park_time` (qlog time the car is **not in Park**). Same formula for a group (sums) and a drill-down drive. API `total_drive_time_s` is fallback / diagnostics only. Miles come from API `distance`.
 
@@ -26,7 +26,7 @@ Click the drive **count** to expand that group (date, miles, engage %). The main
 
 **Not-in-park** is `carState.gearShifter != park` with the same gap rules. Only `park` is excluded (`unknown` and every other gear count). No `carState` samples → fall back to API wall-clock. `CarState.parkingBrake` is a different signal and is not used. Cereal map: `Event.carState @22`, `gearShifter @14`, `GearShifter.park @1`.
 
-Per-route timing is **cached**. Nightly re-checks the last 24h if `maxqlog` grew. Each successful parse is committed immediately so a long run can resume.
+Per-route timing is **cached**. Nightly **lists** the watermark − 24h window plus in-flight / recently-ended cached drives (so `maxqlog` growth is visible). Completed drives from the last 7 days get a tiny targeted metadata re-list — not a full-history `routes_segments` scan. A qlog is downloaded only when the row is unparsed or incoming `maxqlog` grew. Ancient unparsed rows are caught on a cache pass via `/files` without widening the list window. Each successful parse is committed immediately so a long run can resume.
 
 ### Reparse cached qlogs
 
@@ -51,7 +51,7 @@ SET qlog_parsed = 0, engaged_time_s = NULL, engaged_source = NULL, not_in_park_t
 python3 -m op_usage backfill -v --metadata-only
 ```
 
-Re-lists full history, overwrites `length_miles` / times / git_*, skips qlogs. Plain `backfill` still downloads unparsed qlogs. `nightly` will not fix historical zeros. Verbose logs print payload keys plus `distance` / `length` samples.
+Re-lists full history and refreshes `length_miles` / times / git_* (last-known-good: a blank `git_*` or `length_miles=0` does not overwrite a good cached value), skips qlogs. Plain `backfill` still downloads unparsed qlogs. `nightly` will not fix historical zeros. Verbose logs print payload keys plus `distance` / `length` samples.
 
 ```sql
 SELECT COUNT(*) AS total,
@@ -105,8 +105,9 @@ Set **`COMMA_JWT`** (https://jwt.comma.ai) and **`DONGLE_ID`** (Connect → your
 
 ```bash
 source .venv/bin/activate
-python3 -m op_usage demo --out ./site --cache /tmp/op-usage-demo.sqlite
+python3 -m op_usage demo --out /tmp/op-usage-demo-site --cache /tmp/op-usage-demo.sqlite
 python3 -m pytest
+# omit --cache/--out to write temp paths; demo refuses the live cache and ./site
 ```
 
 ### 4. First live backfill, then nightly
@@ -144,7 +145,7 @@ Default sqlite: `~/.cache/op-usage/op-usage.sqlite` (`CACHE_PATH`). Schema is in
 
 | Command | What it does |
 |---------|----------------|
-| `python -m op_usage demo` | Fixture drives → HTML, no JWT |
+| `python -m op_usage demo` | Fixture drives → HTML, no JWT. Defaults to temp cache/site; refuses the live sqlite and `./site` |
 | `python -m op_usage backfill` | Full history, parse uncached qlogs, write HTML |
 | `python -m op_usage backfill --metadata-only` | Full history **metadata only** (refresh `length_miles`); no qlog downloads |
 | `python -m op_usage backfill --reparse-engaged` | Full history: clear listed routes’ cached qlog fields, re-download qlogs |

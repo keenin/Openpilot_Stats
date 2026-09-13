@@ -6,6 +6,9 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
+DEFAULT_CACHE = "~/.cache/op-usage/op-usage.sqlite"
+DEFAULT_SITE = "./site"
+
 
 def _expand(path: str) -> Path:
     return Path(path).expanduser().resolve()
@@ -67,6 +70,22 @@ class Settings:
         return bool(self.comma_jwt and self.dongle_id)
 
 
+def default_cache_path() -> Path:
+    return _expand(DEFAULT_CACHE)
+
+
+def default_site_dir() -> Path:
+    return _expand(DEFAULT_SITE)
+
+
+def is_live_cache_path(path: Path) -> bool:
+    return path.expanduser().resolve() == default_cache_path()
+
+
+def is_live_site_dir(path: Path) -> bool:
+    return path.expanduser().resolve() == default_site_dir()
+
+
 def load_settings() -> Settings:
     load_credential_files()
     jwt = os.environ.get("COMMA_JWT") or None
@@ -77,8 +96,8 @@ def load_settings() -> Settings:
         comma_jwt=jwt.strip() if jwt else None,
         dongle_id=dongle.strip() if dongle else None,
         api_base=os.environ.get("COMMA_API_BASE", "https://api.commadotai.com").rstrip("/"),
-        cache_path=_expand(os.environ.get("CACHE_PATH", "~/.cache/op-usage/op-usage.sqlite")),
-        site_dir=_expand(os.environ.get("SITE_DIR", "./site")),
+        cache_path=_expand(os.environ.get("CACHE_PATH", DEFAULT_CACHE)),
+        site_dir=_expand(os.environ.get("SITE_DIR", DEFAULT_SITE)),
         display_tz=os.environ.get("DISPLAY_TZ", "America/Los_Angeles"),
         owner_name=os.environ.get("OWNER_NAME", "one driver"),
         backfill_start=os.environ.get("BACKFILL_START", "2018-01-01"),

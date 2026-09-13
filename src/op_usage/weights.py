@@ -1,9 +1,10 @@
 """Map a git SHA to a driving-model weights fingerprint (GitHub, cached).
 
 Used only for branch `master`. A fingerprint is the sorted blob SHAs of
-driving weight files under selfdrive/modeld/models (current or pre-move
-path). dmonitoring / docs / code do not count. Nightly caches hits in
-sqlite so repeat generates do not hammer GitHub.
+driving weight files under selfdrive/modeld/models (live tree first,
+then the pre-move openpilot/ prefix). dmonitoring / docs / code do not
+count. Nightly caches hits and confirmed misses in sqlite so repeat
+generates do not hammer GitHub.
 """
 
 from __future__ import annotations
@@ -23,9 +24,10 @@ log = logging.getLogger(__name__)
 DEFAULT_REPO = "commaai/openpilot"
 GITHUB_API = "https://api.github.com"
 MODELS_DIRS = (
-    "openpilot/selfdrive/modeld/models",
     "selfdrive/modeld/models",
+    "openpilot/selfdrive/modeld/models",
 )
+MISSING_WEIGHTS = "-"
 _WEIGHT_SUFFIX = re.compile(r"\.(onnx|pkl|thneed|dlc|chunkmanifest)$", re.I)
 _SSH = re.compile(r"^git@github\.com:(.+?)(?:\.git)?$")
 _HTTPS = re.compile(r"^https://github\.com/(.+?)(?:\.git)?$")
@@ -78,19 +80,43 @@ class GitHubWeightsClient:
         self.timeout_s = timeout_s
         self._disabled = False
 
-    def fingerprint(self, repo: str, sha: str) -> str | None:
-        if self._disabled or not repo or not sha:
-            return None
-        for path in MODELS_DIRS:
-            entries = self._list_dir(repo, path, sha)
-            if entries is None:
-                continue
-            found = fingerprint_from_contents(entries)
-            if found:
-                return found
-        return None
+    @property
+    def disabled(self) -> bool:
+        return self._disabled
 
-    def _list_dir(self, repo: str, path: str, ref: str) -> list[dict] | None:
+    def fingerprint(self, repo: str, sha: str) -> str | None:
+        found, _confirmed = self.lookup(repo, sha)
+        return found
+
+    def lookup(self, repo: str, sha: str) -> tuple[str | None, bool]:
+        """Return (fingerprint, confirmed).
+
+        `confirmed` is True for a hit, or for a miss only when every models
+        path is a 404 or a 200 with no driving-weight files. Transient
+        errors (timeouts, 5xx, RequestException) and rate-limit disable
+        are not confirmed — do not persist those misses.
+        """
+        if self._disabled or not repo or not sha:
+            return None, False
+        kinds: list[str] = []
+        for path in MODELS_DIRS:
+            if self._disabled:
+                return None, False
+            kind, entries = self._list_dir(repo, path, sha)
+            if kind == "ok":
+                found = fingerprint_from_contents(entries or [])
+                if found:
+                    return found, True
+                kinds.append("empty")
+            elif kind == "missing":
+                kinds.append("missing")
+            else:
+                kinds.append("transient")
+        if any(kind == "transient" for kind in kinds):
+            return None, False
+        return None, True
+
+    def _list_dir(self, repo: str, path: str, ref: str) -> tuple[str, list[dict] | None]:
         url = f"{GITHUB_API}/repos/{repo}/contents/{path}"
         headers = {
             "Accept": "application/vnd.github+json",
@@ -104,29 +130,29 @@ class GitHubWeightsClient:
             )
         except requests.RequestException as exc:
             log.warning("GitHub weights lookup failed for %s@%s: %s", repo, ref[:12], exc)
-            return None
+            return "transient", None
         if resp.status_code in (403, 429):
             self._disabled = True
             log.warning(
                 "GitHub rate limited on weights lookup; master SHAs stay per-commit this run"
             )
-            return None
+            return "transient", None
         if resp.status_code == 404:
-            return None
-        if not resp.ok:
+            return "missing", None
+        if resp.status_code >= 500 or not resp.ok:
             log.warning(
                 "GitHub weights lookup HTTP %s for %s@%s",
                 resp.status_code,
                 repo,
                 ref[:12],
             )
-            return None
+            return "transient", None
         payload = resp.json()
         if isinstance(payload, dict):
-            return [payload]
+            return "ok", [payload]
         if isinstance(payload, list):
-            return [item for item in payload if isinstance(item, dict)]
-        return None
+            return "ok", [item for item in payload if isinstance(item, dict)]
+        return "transient", None
 
 
 def make_weights_lookup(
@@ -134,7 +160,7 @@ def make_weights_lookup(
     *,
     client: GitHubWeightsClient | None = None,
 ) -> WeightsLookup:
-    """SHA → fingerprint. Cache hits skip the network; misses are stored."""
+    """SHA → fingerprint. Cache hits (including confirmed misses) skip the network."""
     memo: dict[str, str | None] = {}
     gh = client
 
@@ -146,15 +172,19 @@ def make_weights_lookup(
             return memo[key]
         repo = github_repo_from_remote(remote)
         cached = cache.get_commit_weights(repo, key)
-        if cached:
-            memo[key] = cached
-            return cached
+        if cached is not None:
+            found = None if cached == MISSING_WEIGHTS else cached
+            memo[key] = found
+            return found
         nonlocal gh
         if gh is None:
             gh = GitHubWeightsClient()
-        found = gh.fingerprint(repo, commit)
+        found, confirmed = gh.lookup(repo, commit)
         if found:
             cache.set_commit_weights(repo, key, found)
+            cache.commit()
+        elif confirmed and not gh.disabled:
+            cache.set_commit_weights(repo, key, MISSING_WEIGHTS)
             cache.commit()
         memo[key] = found
         return found
