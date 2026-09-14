@@ -230,18 +230,25 @@ def ticks_from_streams(enabled: list[EnabledSample], motion: list[MotionSample])
     return ticks
 
 
-def load_event_module(openpilot_path: Path | None = None, cereal_path: Path | None = None) -> Any:
+def load_event_module(
+    openpilot_path: Path | None = None,
+    cereal_path: Path | None = None,
+    *,
+    quiet: bool = False,
+) -> Any:
     """Return a module/class with Event.read_multiple_bytes and Event.new_message."""
     cereal_event = _try_cereal(openpilot_path, cereal_path)
     if cereal_event is not None:
-        log.info("qlog parser: using cereal.log.Event")
+        if not quiet:
+            log.info("qlog parser: using cereal.log.Event")
         return cereal_event
     stub = _load_stub_schema()
-    log.info(
-        "qlog parser: using bundled stub schema "
-        "(Event.valid @67, selfdriveState @130, controlsState.enabled @19, "
-        "carState.vEgo @1, cruiseState.speed @10/@1, gearShifter @22/@14 park@1)"
-    )
+    if not quiet:
+        log.info(
+            "qlog parser: using bundled stub schema "
+            "(Event.valid @67, selfdriveState @130, controlsState.enabled @19, "
+            "carState.vEgo @1, cruiseState.speed @10/@1, gearShifter @22/@14 park@1)"
+        )
     return stub
 
 

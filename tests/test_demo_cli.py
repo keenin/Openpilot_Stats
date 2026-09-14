@@ -64,6 +64,8 @@ def test_metadata_only_conflicts_with_reparse(capsys) -> None:
     out = capsys.readouterr().out
     assert "--reparse-engaged" in out
     assert "--metadata-only" in out
+    assert "--jobs" in out
+    assert "OP_USAGE_JOBS" in out
     try:
         main(["sync-qlogs", "--help"])
     except SystemExit as exc:
@@ -71,6 +73,17 @@ def test_metadata_only_conflicts_with_reparse(capsys) -> None:
     sync = capsys.readouterr().out
     assert "--qlog-dir" in sync
     assert "local store" in sync or "missing qlogs" in sync
+
+
+def test_jobs_must_be_positive(capsys) -> None:
+    try:
+        main(["backfill", "--jobs", "0"])
+    except SystemExit as exc:
+        assert exc.code == 2
+    else:
+        raise AssertionError("expected argparse error")
+    err = capsys.readouterr().err
+    assert "--jobs must be >= 1" in err
 
 
 def test_deploy_dry_run(tmp_path, capsys) -> None:

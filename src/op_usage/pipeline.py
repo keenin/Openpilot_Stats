@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import json
 import logging
+import multiprocessing
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -17,8 +19,8 @@ from op_usage.aggregate import aggregate_commits
 from op_usage.cache import SCHEMA_VERSION, Cache, DriveRow
 from op_usage.comma_api import CommaClient, RouteMeta, iter_time_chunks, normalize_routes
 from op_usage.config import Settings, is_live_cache_path, is_live_site_dir
-from op_usage.qlog import extract_engaged_time_from_qlogs, load_event_module
-from op_usage.qlog_store import load_drive_qlogs, list_local_segments, missing_segments, split_route_name
+from op_usage.qlog import EngagedResult, extract_engaged_time_from_qlogs, load_event_module
+from op_usage.qlog_store import list_local_segments, load_route_qlogs, missing_segments, split_route_name
 from op_usage.site import render_site, write_site
 from op_usage.weights import make_weights_lookup
 
@@ -30,6 +32,9 @@ log = logging.getLogger(__name__)
 LATE_UPLOAD_HOURS = 7 * 24
 _START_WINDOW_PAD_MS = 60_000
 
+# Spawn workers cache cereal/stub here. Must not hold sqlite or Comma clients.
+_WORKER_EVENT_MOD = None
+
 
 @dataclass
 class RunStats:
@@ -38,6 +43,29 @@ class RunStats:
     qlogs_skipped_cached: int = 0
     qlogs_missing_local: int = 0
     html_path: str = ""
+
+
+@dataclass(frozen=True)
+class _ParseJob:
+    qlog_dir: str
+    route_name: str
+    dongle_id: str
+    maxqlog: int | None
+    total_drive_time_s: float
+    qlog_parsed: bool
+
+
+@dataclass(frozen=True)
+class _ParseOutcome:
+    route_name: str
+    kind: str
+    qlog_parsed: bool = False
+    total_drive_time_s: float = 0.0
+    maxqlog: int | None = None
+    have: tuple[int, ...] = ()
+    missing: tuple[int, ...] = ()
+    result: EngagedResult | None = None
+    error: str = ""
 
 
 def generate_from_cache(settings: Settings, cache: Cache) -> Path:
@@ -254,78 +282,224 @@ def _parse_local_qlogs(
     event_mod,
     stats: RunStats,
 ) -> None:
-    """Read qlog bytes from disk only. Never calls Comma /files or CDN."""
+    """Read qlog bytes from disk only. Never calls Comma /files or CDN.
+
+    `--jobs 1` stays in-process (same as before). jobs>1 uses a spawn process
+    pool; workers return parse results and the parent commits `save_engaged`.
+    """
+    jobs = max(1, int(settings.parse_jobs or 1))
+    work: list[_ParseJob] = []
     for name in need_parse:
         row = cache.get_drive(name)
         if row is None:
             continue
-        try:
-            blobs = load_drive_qlogs(settings.qlog_dir, row)
-            if blobs is None:
-                dongle, route_id = split_route_name(row.route_name, row.dongle_id)
-                have = list_local_segments(settings.qlog_dir, dongle, route_id)
-                missing = missing_segments(have, row.maxqlog)
-                log.warning(
-                    "qlogs missing locally for %s (qlog_dir=%s maxqlog=%s have=%s "
-                    "missing=%s); skip parse (qlogs_missing_local). "
-                    "Run: python3 -m op_usage sync-qlogs",
-                    name,
-                    settings.qlog_dir,
-                    row.maxqlog,
-                    have,
-                    missing if row.maxqlog is not None else "unknown",
-                )
-                stats.qlogs_missing_local += 1
-                if row.qlog_parsed:
-                    # maxqlog grew (or similar) but files are not here yet; keep
-                    # last-known engaged and retry after sync fills the gaps.
-                    cache.mark_qlog_unparsed(name)
-                    cache.commit()
-                continue
-            result = extract_engaged_time_from_qlogs(blobs, event_mod=event_mod)
-            if result.sample_count == 0:
-                log.info(
-                    "  %s empty qlog parse (samples=0); keeping last-known engaged",
-                    name,
-                )
-                continue
-            # Store None when the gear integral is unusable; denominator_s
-            # falls back to API wall-clock. Do not write 0.0 as "measured".
-            cache.save_engaged(
-                name,
-                result.engaged_time_s,
-                result.source,
-                result.not_in_park_time_s,
-                result.weighted_engaged_time_s,
-                result.steady_frac,
-                result.parser_version,
+        work.append(
+            _ParseJob(
+                qlog_dir=str(settings.qlog_dir),
+                route_name=row.route_name,
+                dongle_id=row.dongle_id,
+                maxqlog=row.maxqlog,
+                total_drive_time_s=row.total_drive_time_s,
+                qlog_parsed=row.qlog_parsed,
             )
+        )
+    if not work:
+        return
+    log.info("parsing %d local qlog routes (jobs=%d)", len(work), jobs)
+    if jobs == 1:
+        done = 0
+        for job in work:
+            done += 1
+            _commit_parse_outcome(
+                cache,
+                settings.qlog_dir,
+                _parse_route_job(job, event_mod=event_mod),
+                stats,
+                done=done,
+                total=len(work),
+                log_progress=False,
+            )
+        return
+
+    ctx = multiprocessing.get_context("spawn")
+    initargs = (
+        str(settings.openpilot_path) if settings.openpilot_path else None,
+        str(settings.cereal_path) if settings.cereal_path else None,
+        log.getEffectiveLevel(),
+    )
+    done = 0
+    with ProcessPoolExecutor(
+        max_workers=jobs,
+        mp_context=ctx,
+        initializer=_init_parse_worker,
+        initargs=initargs,
+    ) as pool:
+        futures = [pool.submit(_parse_route_job, job) for job in work]
+        for fut in as_completed(futures):
+            done += 1
+            try:
+                outcome = fut.result()
+            except Exception as exc:
+                log.warning("qlog parse worker failed: %s", exc)
+                continue
+            _commit_parse_outcome(
+                cache,
+                settings.qlog_dir,
+                outcome,
+                stats,
+                done=done,
+                total=len(work),
+                log_progress=True,
+            )
+
+
+def _init_parse_worker(
+    openpilot_path: str | None,
+    cereal_path: str | None,
+    log_level: int,
+) -> None:
+    """Load cereal/stub once per spawn worker. No sqlite, no Comma client."""
+    global _WORKER_EVENT_MOD
+    logging.basicConfig(
+        level=log_level,
+        format="%(asctime)s %(levelname)s %(message)s",
+    )
+    _WORKER_EVENT_MOD = load_event_module(
+        Path(openpilot_path) if openpilot_path else None,
+        Path(cereal_path) if cereal_path else None,
+        quiet=True,
+    )
+
+
+def _parse_route_job(job: _ParseJob, event_mod=None) -> _ParseOutcome:
+    """Disk + parse only. Picklable for spawn; must not open sqlite or hit Comma."""
+    mod = event_mod if event_mod is not None else _WORKER_EVENT_MOD
+    try:
+        blobs = load_route_qlogs(
+            Path(job.qlog_dir),
+            route_name=job.route_name,
+            dongle_id=job.dongle_id,
+            maxqlog=job.maxqlog,
+        )
+        if blobs is None:
+            dongle, route_id = split_route_name(job.route_name, job.dongle_id)
+            have = list_local_segments(Path(job.qlog_dir), dongle, route_id)
+            missing = missing_segments(have, job.maxqlog)
+            return _ParseOutcome(
+                route_name=job.route_name,
+                kind="missing",
+                qlog_parsed=job.qlog_parsed,
+                total_drive_time_s=job.total_drive_time_s,
+                maxqlog=job.maxqlog,
+                have=tuple(have),
+                missing=tuple(missing),
+            )
+        result = extract_engaged_time_from_qlogs(blobs, event_mod=mod)
+        if result.sample_count == 0:
+            return _ParseOutcome(
+                route_name=job.route_name,
+                kind="empty",
+                qlog_parsed=job.qlog_parsed,
+                total_drive_time_s=job.total_drive_time_s,
+                maxqlog=job.maxqlog,
+                result=result,
+            )
+        return _ParseOutcome(
+            route_name=job.route_name,
+            kind="parsed",
+            qlog_parsed=job.qlog_parsed,
+            total_drive_time_s=job.total_drive_time_s,
+            maxqlog=job.maxqlog,
+            result=result,
+        )
+    except Exception as exc:
+        return _ParseOutcome(
+            route_name=job.route_name,
+            kind="error",
+            qlog_parsed=job.qlog_parsed,
+            total_drive_time_s=job.total_drive_time_s,
+            maxqlog=job.maxqlog,
+            error=str(exc),
+        )
+
+
+def _commit_parse_outcome(
+    cache: Cache,
+    qlog_dir: Path,
+    outcome: _ParseOutcome,
+    stats: RunStats,
+    *,
+    done: int,
+    total: int,
+    log_progress: bool,
+) -> None:
+    """Parent-only sqlite writes. One writer; workers never open the cache."""
+    name = outcome.route_name
+    prefix = f"  [{done}/{total}] " if log_progress else "  "
+    if outcome.kind == "missing":
+        missing = list(outcome.missing) if outcome.maxqlog is not None else "unknown"
+        log.warning(
+            "qlogs missing locally for %s (qlog_dir=%s maxqlog=%s have=%s "
+            "missing=%s); skip parse (qlogs_missing_local). "
+            "Run: python3 -m op_usage sync-qlogs",
+            name,
+            qlog_dir,
+            outcome.maxqlog,
+            list(outcome.have),
+            missing,
+        )
+        stats.qlogs_missing_local += 1
+        if outcome.qlog_parsed:
+            # maxqlog grew (or similar) but files are not here yet; keep
+            # last-known engaged and retry after sync fills the gaps.
+            cache.mark_qlog_unparsed(name)
             cache.commit()
-            stats.qlogs_parsed += 1
-            park_log = (
-                result.not_in_park_time_s
-                if result.not_in_park_time_s is not None
-                else row.total_drive_time_s
-            )
-            log.info(
-                "  %s engaged=%.1fs weighted=%s not_in_park=%.1fs source=%s "
-                "samples=%d gear_samples=%d speed_samples=%d parser=%d",
-                name,
-                result.engaged_time_s,
-                (
-                    f"{result.weighted_engaged_time_s:.1f}s"
-                    if result.weighted_engaged_time_s is not None
-                    else "null"
-                ),
-                park_log,
-                result.source,
-                result.sample_count,
-                result.gear_sample_count,
-                result.speed_sample_count,
-                result.parser_version,
-            )
-        except Exception as exc:
-            log.warning("qlog parse failed for %s: %s", name, exc)
+        return
+    if outcome.kind == "empty":
+        log.info(
+            "%s%s empty qlog parse (samples=0); keeping last-known engaged",
+            prefix,
+            name,
+        )
+        return
+    if outcome.kind != "parsed" or outcome.result is None:
+        log.warning("qlog parse failed for %s: %s", name, outcome.error or outcome.kind)
+        return
+    result = outcome.result
+    cache.save_engaged(
+        name,
+        result.engaged_time_s,
+        result.source,
+        result.not_in_park_time_s,
+        result.weighted_engaged_time_s,
+        result.steady_frac,
+        result.parser_version,
+    )
+    cache.commit()
+    stats.qlogs_parsed += 1
+    park_log = (
+        result.not_in_park_time_s
+        if result.not_in_park_time_s is not None
+        else outcome.total_drive_time_s
+    )
+    log.info(
+        "%s%s engaged=%.1fs weighted=%s not_in_park=%.1fs source=%s "
+        "samples=%d gear_samples=%d speed_samples=%d parser=%d",
+        prefix,
+        name,
+        result.engaged_time_s,
+        (
+            f"{result.weighted_engaged_time_s:.1f}s"
+            if result.weighted_engaged_time_s is not None
+            else "null"
+        ),
+        park_log,
+        result.source,
+        result.sample_count,
+        result.gear_sample_count,
+        result.speed_sample_count,
+        result.parser_version,
+    )
 
 
 def _list_chunk(

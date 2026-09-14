@@ -5,7 +5,7 @@ from pathlib import Path
 from helpers import drive_row, seed_local_qlogs
 from op_usage.cache import Cache
 from op_usage.cli import main
-from op_usage.config import Settings, default_qlog_dir, is_live_qlog_dir, load_settings
+from op_usage.config import Settings, default_qlog_dir, default_parse_jobs, is_live_qlog_dir, load_settings
 from op_usage.qlog_store import (
     list_local_segments,
     load_route_qlogs,
@@ -209,3 +209,28 @@ def test_default_qlog_dir_is_cache_family() -> None:
     assert path.parent.name == "op-usage"
     assert is_live_qlog_dir(path)
     assert not is_live_qlog_dir(Path("/tmp/op-usage-qlogs"))
+
+
+def test_parse_jobs_env_and_default(monkeypatch) -> None:
+    n = default_parse_jobs()
+    assert 1 <= n <= 32
+    monkeypatch.delenv("OP_USAGE_JOBS", raising=False)
+    assert load_settings().parse_jobs == n
+    monkeypatch.setenv("OP_USAGE_JOBS", "4")
+    assert load_settings().parse_jobs == 4
+    monkeypatch.setenv("OP_USAGE_JOBS", "1")
+    assert load_settings().parse_jobs == 1
+    monkeypatch.setenv("OP_USAGE_JOBS", "0")
+    try:
+        load_settings()
+    except SystemExit as exc:
+        assert "OP_USAGE_JOBS" in str(exc)
+    else:
+        raise AssertionError("expected SystemExit")
+    monkeypatch.setenv("OP_USAGE_JOBS", "nope")
+    try:
+        load_settings()
+    except SystemExit as exc:
+        assert "OP_USAGE_JOBS" in str(exc)
+    else:
+        raise AssertionError("expected SystemExit")
