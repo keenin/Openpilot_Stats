@@ -18,10 +18,10 @@ Debian box (cron 03:00 PT)
 - **Other branches:** one row per git SHA.
 - **`master` only** (`master`, `origin/master`, `refs/heads/master`): walk qualifying drives in start-time order and split when the driving-model weights fingerprint changes. A SHA that reappears after a different fingerprint is a **new interval**. Weights = blob SHAs of driving ONNX/pkl under `selfdrive/modeld/models` (then `openpilot/selfdrive/modeld/models`), via the GitHub contents API from `git_commit` + `git_remote`, cached in sqlite (including confirmed misses). UI / cars / CI commits do not split the group. Unknown fingerprints stay one-row-per-interval. Commit cell = last SHA (tooltip: first … last). Optional `GITHUB_TOKEN` raises the GitHub rate limit.
 - **Sort** by last qualifying drive, newest first (not engage %).
-- **Engage %** = `engaged_time / not_in_park_time` (group and drill-down use the same sums). API `total_drive_time_s` is fallback only. Miles from API `distance`.
-- **Weighted engaged** discounts long steady-speed / freeway sits (fuse then bite toward a speed floor). Engage % stays raw. Routes with engaged time but no usable `vEgo` contribute raw engaged only and are omitted from the weighted average.
+- **Engage %** = `weighted_engaged_time / not_in_park_time` when the route has usable `vEgo`; otherwise raw `engaged_time / not_in_park_time`. Group and drill-down use the same sums. Routes with no weighted value keep raw engaged in the numerator so they don’t zero the average. API `total_drive_time_s` is fallback only. Miles from API `distance`.
+- **Engaged time** (the hours column) is raw wall-clock. **Weighted engaged** is the Engage % numerator: it discounts long steady-speed / freeway sits (fuse then bite toward a speed floor).
 
-Click the drive **count** to expand that group (date, miles, engage %, weighted engaged, weight %). The main view does not list every drive.
+Click the drive **count** to expand that group (date, miles, engage %, weighted engaged). The main view does not list every drive.
 
 **Engaged time** is a qlog integral of `logMonoTime` deltas (gaps > 5s skipped): prefer `selfdriveState.enabled` (`Event` `@130`); else `controlsState.enabled` (`@19`, including `deprecated.enabled`). Bundled stub: `Event.valid @67` stays *outside* the union.
 

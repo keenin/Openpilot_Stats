@@ -8,6 +8,7 @@ from op_usage.aggregate import (
     park_time_usable,
     qualifies,
 )
+from op_usage.steady import Tick, weighted_engaged_seconds
 
 REMOTE = "git@github.com:commaai/openpilot.git"
 
@@ -157,8 +158,11 @@ def test_null_weighted_does_not_poison_commit_average() -> None:
     assert row.weighted_engaged_time_s == 600
     assert row.weighted_raw_engaged_s == 2000
     assert abs(row.weight_pct - 30.0) < 1e-9
+    # Null weighted keeps raw engaged in the Engage % numerator (5600/10800).
+    assert abs(row.engage_pct - (5600 / 10800) * 100) < 1e-9
     assert row.drives[2].weighted_engaged_time_s is None
     assert row.drives[2].weight_pct is None
+    assert abs(row.drives[2].engage_pct - (5000 / 3600) * 100) < 1e-9
 
 
 def test_all_null_weighted_stays_none() -> None:
@@ -169,6 +173,125 @@ def test_all_null_weighted_stays_none() -> None:
     row = aggregate_commits(group)[0]
     assert row.weighted_engaged_time_s is None
     assert row.weight_pct is None
+    assert abs(row.engage_pct - 50.0) < 1e-9
+    assert abs(row.drives[0].engage_pct - 50.0) < 1e-9
+
+
+def test_null_weighted_engage_pct_falls_back_to_raw() -> None:
+    group = [
+        drive_row(
+            route_name=f"r{i}",
+            git_commit="rawp",
+            start_time_utc_ms=1000 + i,
+            engaged_time_s=1800,
+            total_drive_time_s=3600,
+            not_in_park_time_s=2000,
+            weighted_engaged_time_s=None,
+        )
+        for i in range(3)
+    ]
+    row = aggregate_commits(group)[0]
+    assert row.engaged_time_s == 5400
+    assert row.weighted_engaged_time_s is None
+    assert abs(row.engage_pct - 90.0) < 1e-9
+    assert row.drives[0].engage_pct == 90.0
+
+
+def _hold_ticks(duration_s: float, mph: float, *, t0: float = 0.0) -> list[Tick]:
+    n = int(round(duration_s))
+    set_mph = 25.0 if mph <= 0 else mph
+    return [
+        Tick(t_s=t0 + i, enabled=True, speed_mph=mph, set_mph=set_mph)
+        for i in range(n + 1)
+    ]
+
+
+def _concat_ticks(*parts: list[Tick]) -> list[Tick]:
+    out: list[Tick] = []
+    for part in parts:
+        if not part:
+            continue
+        if out and abs(part[0].t_s - out[-1].t_s) < 1e-9:
+            out.extend(part[1:])
+        else:
+            out.extend(part)
+    return out
+
+
+def _town_ticks(duration_s: float) -> list[Tick]:
+    t0 = 0.0
+    parts: list[list[Tick]] = []
+    pattern = [
+        (180, 25.0),
+        (20, 0.0),
+        (160, 25.0),
+        (180, 20.0),
+        (180, 25.0),
+        (20, 0.0),
+        (160, 25.0),
+        (180, 22.0),
+        (120, 25.0),
+    ]
+    for dur, mph in pattern:
+        parts.append(_hold_ticks(dur, mph, t0=t0))
+        t0 = parts[-1][-1].t_s
+    ticks = _concat_ticks(*parts)
+    raw = ticks[-1].t_s - ticks[0].t_s
+    assert abs(raw - duration_s) < 2.0, raw
+    return ticks
+
+
+def test_engage_pct_uses_weighted_numerator_when_present() -> None:
+    group = [
+        drive_row(
+            route_name=f"w{i}",
+            git_commit="wgtp",
+            start_time_utc_ms=1000 + i,
+            engaged_time_s=1800,
+            total_drive_time_s=3600,
+            not_in_park_time_s=2000,
+            weighted_engaged_time_s=900,
+        )
+        for i in range(3)
+    ]
+    row = aggregate_commits(group)[0]
+    assert row.engaged_time_s == 5400
+    assert row.not_in_park_time_s == 6000
+    assert abs(row.engage_pct - 45.0) < 1e-9
+    assert abs(row.drives[0].engage_pct - 45.0) < 1e-9
+
+
+def test_freeway_engage_pct_below_town_with_same_raw_hours() -> None:
+    duration = 20 * 60
+    freeway_w = weighted_engaged_seconds(_hold_ticks(duration, 70))
+    town_w = weighted_engaged_seconds(_town_ticks(duration))
+    assert freeway_w is not None and town_w is not None
+    assert freeway_w < town_w
+
+    def _group(commit: str, weighted: float):
+        return [
+            drive_row(
+                route_name=f"{commit}-{i}",
+                git_commit=commit,
+                start_time_utc_ms=1000 + i,
+                engaged_time_s=duration,
+                not_in_park_time_s=duration,
+                total_drive_time_s=duration,
+                weighted_engaged_time_s=weighted,
+            )
+            for i in range(3)
+        ]
+
+    freeway = aggregate_commits(_group("ffff", freeway_w))[0]
+    town = aggregate_commits(_group("tttt", town_w))[0]
+    assert freeway.engaged_time_s == town.engaged_time_s == duration * 3
+    raw_pct = 100.0
+    assert abs(town.engage_pct - (town_w / duration) * 100) < 1e-9
+    assert abs(freeway.engage_pct - (freeway_w / duration) * 100) < 1e-9
+    assert freeway.engage_pct < town.engage_pct
+    assert freeway.engage_pct < raw_pct
+    assert town.engage_pct > 90.0
+    assert freeway.drives[0].engage_pct < town.drives[0].engage_pct
 
 
 def test_non_master_stays_one_row_per_sha_even_with_lookup() -> None:

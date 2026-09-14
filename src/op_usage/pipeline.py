@@ -383,7 +383,7 @@ def _ts_ms(item: dict, ms_key: str, iso_key: str) -> int:
 
 
 def _meta_to_row(meta: RouteMeta) -> DriveRow:
-    # API wall-clock; engage % uses not_in_park_time_s from the qlog parse.
+    # API wall-clock; engage % denom is not_in_park_time_s from the qlog parse.
     duration = max(0.0, (meta.end_time_utc_ms - meta.start_time_utc_ms) / 1000.0)
     return DriveRow(
         **asdict(meta),

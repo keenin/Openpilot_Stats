@@ -43,12 +43,12 @@ def test_demo_html_is_table_only_qualified_commits_newest_first() -> None:
         assert f"<th>{header}</th>" in html
     assert "Engage %" in html
     assert "Weighted engaged" in html
-    assert "Weight %" in html
-    assert "steady-speed / freeway sits" in html
+    assert "Weight %" not in html
+    assert "steady-speed-weighted engaged time over not-in-park" in html
     assert "Updated 2026-09-11 03:00 PDT" in html
     assert "<table class=\"nested\">" in html
     assert "2026-09-10" in html
-    assert 'colspan="9"' in html
+    assert 'colspan="8"' in html
     for blob in CHROME:
         assert blob not in html
     assert "<title>Openpilot Stats</title>" in html
@@ -93,3 +93,28 @@ def test_master_era_hash_is_first_last_without_new_chrome() -> None:
     assert commit_url(commits[0].git_remote, commits[0].git_commit).endswith(
         "/commit/bbbbbbb222222222222222222222222222222222"
     )
+
+
+def test_engage_pct_html_uses_weighted_keeps_raw_engaged_hours() -> None:
+    drives = [
+        drive_row(
+            route_name=f"f{i}",
+            git_commit="ffff111111111111111111111111111111111111",
+            start_time_utc_ms=1_000 + i,
+            engaged_time_s=3600,
+            total_drive_time_s=3600,
+            not_in_park_time_s=3600,
+            weighted_engaged_time_s=720,
+        )
+        for i in range(3)
+    ]
+    html = render_site(
+        aggregate_commits(drives),
+        generated_at=datetime(2026, 9, 11, 10, 0, tzinfo=timezone.utc),
+        display_tz="UTC",
+    )
+    assert format_duration(3600 * 3) in html
+    assert format_duration(720 * 3) in html
+    assert format_pct(20.0) in html
+    assert "3h 00m" in html
+    assert "Weight %" not in html

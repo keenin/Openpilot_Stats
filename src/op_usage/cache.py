@@ -3,8 +3,9 @@
 qlog_parsed=1 rows are not re-read unless incoming maxqlog grew or
 parses are explicitly cleared. The 24h end-time window is a listing
 hint (see pipeline), not a nightly re-download trigger.
-total_drive_time_s is API wall-clock; engage % uses not_in_park_time_s
-after a parse. Schema picture is in the README.
+total_drive_time_s is API wall-clock; engage % uses weighted engaged
+over not_in_park_time_s after a parse (raw engaged if weighted is null).
+Schema picture is in the README.
 """
 
 from __future__ import annotations

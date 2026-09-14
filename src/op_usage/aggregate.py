@@ -11,7 +11,9 @@ different fingerprint is a new interval (no first-seen SHA bucket).
 Unknown fingerprints stay fail-closed (never merge two unknown SHAs;
 consecutive drives of one unknown SHA stay one per-SHA interval).
 `origin/master` and `refs/heads/master` count as master.
-Engage % = engaged / not_in_park (wall-clock fallback).
+Engage % = weighted_engaged / not_in_park when vEgo weighting exists,
+else raw engaged / not_in_park (wall-clock fallback). Displayed engaged
+hours stay raw wall-clock.
 """
 
 from __future__ import annotations
@@ -38,7 +40,10 @@ class DriveView:
 
     @property
     def engage_pct(self) -> float:
-        return _engage_pct(self.engaged_time_s, self.not_in_park_time_s)
+        return _engage_pct(
+            _engage_numerator(self.engaged_time_s, self.weighted_engaged_time_s),
+            self.not_in_park_time_s,
+        )
 
     @property
     def weight_pct(self) -> float | None:
@@ -63,7 +68,11 @@ class CommitRow:
 
     @property
     def engage_pct(self) -> float:
-        return _engage_pct(self.engaged_time_s, self.not_in_park_time_s)
+        numerator = sum(
+            _engage_numerator(d.engaged_time_s, d.weighted_engaged_time_s)
+            for d in self.drives
+        )
+        return _engage_pct(numerator, self.not_in_park_time_s)
 
     @property
     def weight_pct(self) -> float | None:
@@ -76,6 +85,13 @@ class CommitRow:
         if first and first != last:
             return f"{first}…{last}"
         return last
+
+
+def _engage_numerator(engaged: float, weighted: float | None) -> float:
+    """Weighted engaged when present; raw if that route had no usable vEgo."""
+    if weighted is None:
+        return engaged
+    return float(weighted)
 
 
 def _engage_pct(engaged: float, denom: float) -> float:

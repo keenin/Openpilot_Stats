@@ -2,7 +2,7 @@
 
 Long holds at constant speed (freeway sits) decay toward a speed-dependent
 floor after a fuse. Faster → shorter fuse, harder bite, lower floor.
-Engage % stays raw; this only produces weighted_engaged_time_s.
+Displayed engaged hours stay raw; Engage % uses this as its numerator.
 
 Longitudinal only: speed, standstill, cruise set speed. Steering is ignored.
 """
