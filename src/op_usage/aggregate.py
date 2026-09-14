@@ -34,15 +34,10 @@ class DriveView:
     not_in_park_time_s: float
     git_branch: str
     git_commit: str
-    weighted_engaged_time_s: float | None = None
 
     @property
     def engage_pct(self) -> float:
         return _engage_pct(self.engaged_time_s, self.not_in_park_time_s)
-
-    @property
-    def weight_pct(self) -> float | None:
-        return _weight_pct(self.weighted_engaged_time_s, self.engaged_time_s)
 
 
 @dataclass
@@ -58,16 +53,10 @@ class CommitRow:
     not_in_park_time_s: float
     drives: list[DriveView] = field(default_factory=list)
     era_first_commit: str = ""
-    weighted_engaged_time_s: float | None = None
-    weighted_raw_engaged_s: float = 0.0
 
     @property
     def engage_pct(self) -> float:
         return _engage_pct(self.engaged_time_s, self.not_in_park_time_s)
-
-    @property
-    def weight_pct(self) -> float | None:
-        return _weight_pct(self.weighted_engaged_time_s, self.weighted_raw_engaged_s)
 
     @property
     def short_hash(self) -> str:
@@ -82,12 +71,6 @@ def _engage_pct(engaged: float, denom: float) -> float:
     if denom <= 0:
         return 0.0
     return 100.0 * engaged / denom
-
-
-def _weight_pct(weighted: float | None, raw: float) -> float | None:
-    if weighted is None or raw <= 0:
-        return None
-    return 100.0 * weighted / raw
 
 
 def qualifies(drive: DriveRow, min_miles: float = MIN_MILES) -> bool:
@@ -131,7 +114,6 @@ def to_drive_view(drive: DriveRow) -> DriveView:
         not_in_park_time_s=denominator_s(drive),
         git_branch=drive.git_branch,
         git_commit=drive.git_commit,
-        weighted_engaged_time_s=drive.weighted_engaged_time_s,
     )
 
 
@@ -214,16 +196,6 @@ def _commit_row(group: list[DriveRow]) -> CommitRow:
             seen_l.add(key)
     first_sha = seen[0] if seen else last.git_commit
     last_sha = seen[-1] if seen else last.git_commit
-    weighted_sum = 0.0
-    weighted_raw = 0.0
-    any_weighted = False
-    for drive in group:
-        w = drive.weighted_engaged_time_s
-        if w is None:
-            continue
-        any_weighted = True
-        weighted_sum += float(w)
-        weighted_raw += float(drive.engaged_time_s or 0.0)
     return CommitRow(
         git_commit=last_sha or first_sha,
         git_branch=last.git_branch or "(unknown)",
@@ -236,6 +208,4 @@ def _commit_row(group: list[DriveRow]) -> CommitRow:
         not_in_park_time_s=sum(denominator_s(d) for d in group),
         drives=[to_drive_view(d) for d in group],
         era_first_commit=first_sha,
-        weighted_engaged_time_s=weighted_sum if any_weighted else None,
-        weighted_raw_engaged_s=weighted_raw,
     )

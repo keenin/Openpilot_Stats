@@ -180,8 +180,7 @@ def run_pipeline(
         if cache.schema_upgraded_from:
             log.warning(
                 "cache schema_version %s → %s; cached qlog rows will not "
-                "reparse unless you pass --reparse-engaged (or SQL-clear qlog_parsed). "
-                "Weighted engaged time needs a reparse of routes that predate parser v2.",
+                "reparse unless you pass --reparse-engaged (or SQL-clear qlog_parsed).",
                 cache.schema_upgraded_from,
                 SCHEMA_VERSION,
             )

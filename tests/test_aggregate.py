@@ -128,47 +128,24 @@ def test_denominator_park_zero_with_engaged_falls_back() -> None:
     assert abs(row.engage_pct - 50.0) < 1e-9
 
 
-def test_null_weighted_does_not_poison_commit_average() -> None:
+def test_engage_pct_ignores_weighted_sqlite_fields() -> None:
     group = [
         drive_row(
-            route_name="w0",
+            route_name=f"w{i}",
             git_commit="wwww",
-            start_time_utc_ms=1000,
-            engaged_time_s=1000,
+            start_time_utc_ms=1000 + i,
+            engaged_time_s=1800,
+            total_drive_time_s=3600,
+            not_in_park_time_s=2000,
             weighted_engaged_time_s=200,
-        ),
-        drive_row(
-            route_name="w1",
-            git_commit="wwww",
-            start_time_utc_ms=2000,
-            engaged_time_s=1000,
-            weighted_engaged_time_s=400,
-        ),
-        drive_row(
-            route_name="w2",
-            git_commit="wwww",
-            start_time_utc_ms=3000,
-            engaged_time_s=5000,
-            weighted_engaged_time_s=None,
-        ),
-    ]
-    row = aggregate_commits(group)[0]
-    assert row.engaged_time_s == 7000
-    assert row.weighted_engaged_time_s == 600
-    assert row.weighted_raw_engaged_s == 2000
-    assert abs(row.weight_pct - 30.0) < 1e-9
-    assert row.drives[2].weighted_engaged_time_s is None
-    assert row.drives[2].weight_pct is None
-
-
-def test_all_null_weighted_stays_none() -> None:
-    group = [
-        drive_row(route_name=f"n{i}", git_commit="nnnn", start_time_utc_ms=1000 + i, weighted_engaged_time_s=None)
+        )
         for i in range(3)
     ]
     row = aggregate_commits(group)[0]
-    assert row.weighted_engaged_time_s is None
-    assert row.weight_pct is None
+    assert abs(row.engage_pct - 90.0) < 1e-9
+    assert row.drives[0].engage_pct == 90.0
+    assert not hasattr(row, "weighted_engaged_time_s")
+    assert not hasattr(row, "weight_pct")
 
 
 def test_non_master_stays_one_row_per_sha_even_with_lookup() -> None:
