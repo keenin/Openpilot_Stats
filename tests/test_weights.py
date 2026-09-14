@@ -176,6 +176,7 @@ def test_generate_merges_master_via_lookup(tmp_path, monkeypatch) -> None:
         dongle_id=None,
         api_base="https://example.invalid",
         cache_path=tmp_path / "c.sqlite",
+        qlog_dir=tmp_path / "qlogs",
         site_dir=tmp_path / "site",
         display_tz="UTC",
         backfill_start="2026-09-01",

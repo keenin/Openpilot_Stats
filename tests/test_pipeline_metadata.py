@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from pathlib import Path
 
-from helpers import drive_row, seed_parsed
+from helpers import drive_row, seed_local_qlogs, seed_parsed
 from op_usage.cache import Cache
 from op_usage.config import Settings
 from op_usage.pipeline import LATE_UPLOAD_HOURS, _coalesce_start_windows, run_pipeline
@@ -38,6 +38,7 @@ def _settings(tmp_path: Path) -> Settings:
         dongle_id="deadbeefcafebabe",
         api_base="https://example.invalid",
         cache_path=tmp_path / "c.sqlite",
+        qlog_dir=tmp_path / "qlogs",
         site_dir=tmp_path / "site",
         display_tz="UTC",
         backfill_start="2026-09-01",
@@ -60,11 +61,12 @@ def _route(**kwargs) -> dict:
 
 
 class _QlogClient:
-    def __init__(self, routes: list[dict], *, refuse_qlogs: bool = False) -> None:
+    """Listing stub. Parse must never call /files or CDN — those raise."""
+
+    def __init__(self, routes: list[dict]) -> None:
         self.routes = routes
         self.qlog_calls = 0
         self.windows: list[tuple[int, int]] = []
-        self.refuse_qlogs = refuse_qlogs
         self.blob = encode_synthetic_qlog(
             [
                 EnabledSample(0, True, SELFDRIVE_SOURCE),
@@ -84,18 +86,26 @@ class _QlogClient:
 
     def route_qlog_urls(self, route_name: str) -> list[str]:
         self.qlog_calls += 1
-        if self.refuse_qlogs:
-            raise AssertionError("qlogs must not be fetched in metadata-only mode")
-        return [f"https://example.invalid/{route_name}.qlog"]
+        raise AssertionError("parse/backfill must not call route_qlog_urls")
 
     def download_bytes(self, url: str) -> bytes:
-        if self.refuse_qlogs:
-            self.qlog_calls += 1
-            raise AssertionError("qlogs must not be fetched in metadata-only mode")
-        return self.blob
+        self.qlog_calls += 1
+        raise AssertionError("parse/backfill must not call download_bytes")
 
 
-def _run(tmp_path, monkeypatch, fake, seeds, watermark, **flags):
+def _seed_client_routes(settings: Settings, fake: _QlogClient, blob: bytes | None = None) -> None:
+    data = fake.blob if blob is None else blob
+    for route in fake.routes:
+        seed_local_qlogs(
+            settings.qlog_dir,
+            route["fullname"],
+            data,
+            maxqlog=int(route.get("maxqlog") or 0),
+            dongle_id=str(route.get("dongle_id") or ""),
+        )
+
+
+def _run(tmp_path, monkeypatch, fake, seeds, watermark, *, seed_qlogs: bool = False, **flags):
     monkeypatch.setattr("op_usage.pipeline.CommaClient", lambda **kwargs: fake)
     settings = _settings(tmp_path)
     with Cache(settings.cache_path) as cache:
@@ -104,6 +114,8 @@ def _run(tmp_path, monkeypatch, fake, seeds, watermark, **flags):
         if watermark is not None:
             cache.set_watermark_ms(watermark)
         cache.commit()
+    if seed_qlogs:
+        _seed_client_routes(settings, fake)
     return run_pipeline(settings, **flags), settings
 
 
@@ -124,7 +136,7 @@ def test_metadata_only_upserts_without_qlogs_or_blanking(tmp_path, monkeypatch) 
         "op_usage.pipeline.load_event_module",
         lambda *a, **k: (_ for _ in ()).throw(AssertionError("cereal must not load")),
     )
-    fake = _QlogClient([ROUTE], refuse_qlogs=True)
+    fake = _QlogClient([ROUTE])
     stats, settings = _run(
         tmp_path,
         monkeypatch,
@@ -218,8 +230,9 @@ def test_nightly_reparse_does_not_wipe_unlisted_history(tmp_path, monkeypatch) -
         now_ms,
         backfill=False,
         reparse_engaged=True,
+        seed_qlogs=True,
     )
-    assert fake.qlog_calls == 1
+    assert fake.qlog_calls == 0
     assert stats.qlogs_parsed == 1
     listed, history = _get(settings, recent["fullname"]), _get(settings, hist)
     assert history is not None and history.qlog_parsed
@@ -260,11 +273,13 @@ def test_nightly_reparses_friday_drive_when_maxqlog_grows(tmp_path, monkeypatch)
         ],
         now_ms,
         backfill=False,
+        seed_qlogs=True,
     )
     assert any(lo <= start_ms < hi for lo, hi in fake.windows), fake.windows
     assert all(lo > 86_400_000 for lo, _hi in fake.windows), fake.windows
-    assert fake.qlog_calls == 1
+    assert fake.qlog_calls == 0
     assert stats.qlogs_parsed == 1
+    assert stats.qlogs_missing_local == 0
     row = _get(settings, route["fullname"])
     assert row is not None
     assert row.maxqlog == 6
@@ -276,6 +291,14 @@ def test_nightly_does_not_list_from_ancient_unparsed(tmp_path, monkeypatch) -> N
     ancient_start = int(datetime(2018, 6, 1, tzinfo=timezone.utc).timestamp() * 1000)
     stranded = "deadbeefcafebabe|stranded-2018"
     fake = _QlogClient([])
+    settings = _settings(tmp_path)
+    seed_local_qlogs(
+        settings.qlog_dir,
+        stranded,
+        fake.blob,
+        maxqlog=1,
+        dongle_id=ROUTE["dongle_id"],
+    )
     stats, settings = _run(
         tmp_path,
         monkeypatch,
@@ -298,7 +321,8 @@ def test_nightly_does_not_list_from_ancient_unparsed(tmp_path, monkeypatch) -> N
     assert fake.windows
     assert min(lo for lo, _hi in fake.windows) >= now_ms - 25 * 3_600_000
     assert stats.qlogs_parsed == 1
-    assert fake.qlog_calls == 1
+    assert fake.qlog_calls == 0
+    assert stats.qlogs_missing_local == 0
     row = _get(settings, stranded)
     assert row is not None and row.qlog_parsed
 
@@ -349,7 +373,7 @@ def test_empty_qlog_parse_keeps_last_good_engaged(tmp_path, monkeypatch) -> None
         segment_end_times=[now_ms],
     )
     fake = _QlogClient([route])
-    fake.blob = b""
+    fake.blob = encode_synthetic_qlog([], compress="bz2")
     stats, settings = _run(
         tmp_path,
         monkeypatch,
@@ -368,11 +392,129 @@ def test_empty_qlog_parse_keeps_last_good_engaged(tmp_path, monkeypatch) -> None
         ],
         start_ms,
         backfill=False,
+        seed_qlogs=True,
     )
-    assert fake.qlog_calls == 1
+    assert fake.qlog_calls == 0
     assert stats.qlogs_parsed == 0
+    assert stats.qlogs_missing_local == 0
     row = _get(settings, route["fullname"])
     assert row is not None
     assert row.qlog_parsed is True
     assert row.engaged_time_s == 99.0
     assert row.not_in_park_time_s == 80.0
+
+
+def test_parse_missing_local_does_not_call_download(tmp_path, monkeypatch) -> None:
+    fake = _QlogClient([ROUTE])
+    stats, settings = _run(
+        tmp_path,
+        monkeypatch,
+        fake,
+        [],
+        None,
+        backfill=True,
+        seed_qlogs=False,
+    )
+    assert fake.qlog_calls == 0
+    assert stats.qlogs_parsed == 0
+    assert stats.qlogs_missing_local >= 1
+    row = _get(settings, ROUTE["fullname"])
+    assert row is not None
+    assert row.qlog_parsed is False
+    assert row.engaged_time_s is None
+
+
+def test_parse_uses_local_files_not_client(tmp_path, monkeypatch) -> None:
+    fake = _QlogClient([ROUTE])
+    stats, settings = _run(
+        tmp_path,
+        monkeypatch,
+        fake,
+        [],
+        None,
+        backfill=True,
+        seed_qlogs=True,
+    )
+    assert fake.qlog_calls == 0
+    assert stats.qlogs_parsed == 1
+    assert stats.qlogs_missing_local == 0
+    row = _get(settings, ROUTE["fullname"])
+    assert row is not None and row.qlog_parsed
+    assert row.engaged_time_s is not None and row.engaged_time_s > 0
+
+
+def test_incomplete_local_skips_and_retries_after_fill(tmp_path, monkeypatch) -> None:
+    now_ms = _now()
+    start_ms = now_ms - 3_600_000
+    route = _route(
+        fullname="deadbeefcafebabe|partial",
+        maxqlog=3,
+        segment_start_times=[start_ms],
+        segment_end_times=[now_ms],
+    )
+    fake = _QlogClient([route])
+    stats, settings = _run(
+        tmp_path,
+        monkeypatch,
+        fake,
+        [
+            lambda c: seed_parsed(
+                c,
+                route["fullname"],
+                engaged=99.0,
+                not_in_park=80.0,
+                dongle_id=route["dongle_id"],
+                start_time_utc_ms=start_ms,
+                end_time_utc_ms=now_ms,
+                maxqlog=0,
+            )
+        ],
+        start_ms,
+        backfill=False,
+    )
+    seed_local_qlogs(
+        settings.qlog_dir,
+        route["fullname"],
+        fake.blob,
+        maxqlog=0,
+        dongle_id=route["dongle_id"],
+    )
+    stats, settings = _run(
+        tmp_path,
+        monkeypatch,
+        fake,
+        [],
+        start_ms,
+        backfill=False,
+    )
+    assert fake.qlog_calls == 0
+    assert stats.qlogs_missing_local >= 1
+    assert stats.qlogs_parsed == 0
+    row = _get(settings, route["fullname"])
+    assert row is not None
+    assert row.maxqlog == 3
+    assert row.qlog_parsed is False
+    assert row.engaged_time_s == 99.0
+
+    seed_local_qlogs(
+        settings.qlog_dir,
+        route["fullname"],
+        fake.blob,
+        maxqlog=3,
+        dongle_id=route["dongle_id"],
+    )
+    stats, settings = _run(
+        tmp_path,
+        monkeypatch,
+        fake,
+        [],
+        start_ms,
+        backfill=False,
+    )
+    assert fake.qlog_calls == 0
+    assert stats.qlogs_parsed == 1
+    assert stats.qlogs_missing_local == 0
+    row = _get(settings, route["fullname"])
+    assert row is not None and row.qlog_parsed
+    assert row.engaged_time_s != 99.0
+

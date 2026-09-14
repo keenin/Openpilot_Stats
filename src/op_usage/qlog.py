@@ -1,9 +1,15 @@
 """Engaged-time and not-in-park-time extraction from openpilot qlogs.
 
-Access path (live):
-  1. GET /v1/route/{routeName}/files  → payload["qlogs"] signed URLs
-  2. HTTP GET each URL (commadata blob; JWT is in the signed query)
-  3. Decompress bz2 or zstd (magic-byte detect, same as openpilot LogReader)
+Access path:
+  Parse/backfill reads `{qlog_dir}/{dongle}/{route_id}/{seg}.qlog` only.
+  Comma GET /v1/route/{routeName}/files + CDN GET happen in `sync-qlogs`,
+  not inside the parse loop.
+
+  1. (sync) GET /v1/route/{routeName}/files  → payload["qlogs"] signed URLs
+  2. (sync) HTTP GET each URL (commadata blob; JWT is in the signed query)
+     Atomic write to the local store.
+  3. (parse) Read local bytes. Decompress bz2 or zstd (magic-byte detect,
+     same as openpilot LogReader)
   4. Parse concatenated Cap'n Proto Event messages
 
 Fields used:

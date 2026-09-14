@@ -1,4 +1,4 @@
-"""CLI: demo | backfill | nightly | generate | deploy."""
+"""CLI: demo | backfill | nightly | sync-qlogs | generate | deploy."""
 
 from __future__ import annotations
 
@@ -14,6 +14,7 @@ from pathlib import Path
 from op_usage.cache import Cache
 from op_usage.config import load_settings
 from op_usage.pipeline import generate_from_cache, run_demo, run_pipeline
+from op_usage.qlog_store import run_sync_qlogs
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -30,6 +31,7 @@ def main(argv: list[str] | None = None) -> int:
     shared = argparse.ArgumentParser(add_help=False)
     shared.add_argument("--out", type=Path, default=None, help="SITE_DIR override")
     shared.add_argument("--cache", type=Path, default=None, help="sqlite override")
+    shared.add_argument("--qlog-dir", type=Path, default=None, help="OP_USAGE_QLOG_DIR override")
     sub = parser.add_subparsers(dest="cmd", required=True)
 
     reparse = argparse.ArgumentParser(add_help=False)
@@ -39,9 +41,10 @@ def main(argv: list[str] | None = None) -> int:
         help=(
             "Clear cached qlog parses for routes this run will list "
             "(engaged_time_s, not_in_park_time_s, weighted_engaged_time_s, "
-            "including zeros) and re-read those qlogs. Does not wipe routes "
-            "outside the fetch window. After an interrupted run, resume with "
-            "plain backfill/nightly. Needed once after the weighted-time schema bump."
+            "including zeros) and re-read those qlogs from the local store. "
+            "Does not download from Comma. Does not wipe routes outside the "
+            "fetch window. After an interrupted run, resume with plain "
+            "backfill/nightly. Needed once after the weighted-time schema bump."
         ),
     )
     reparse.add_argument(
@@ -49,8 +52,8 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help=(
             "Re-list route metadata (length_miles, times, git_*) from the comma API "
-            "and skip every qlog download. Use after the distance-field fix to refresh "
-            "cached miles without --reparse-engaged."
+            "and skip every qlog parse. Use after the distance-field fix to refresh "
+            "cached miles without --reparse-engaged. Does not call /files."
         ),
     )
 
@@ -69,12 +72,23 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser(
         "backfill",
         parents=[shared, reparse],
-        help="Full historical fetch once, then write HTML.",
+        help="Full historical metadata list, parse local qlogs, write HTML.",
     )
     sub.add_parser(
         "nightly",
         parents=[shared, reparse],
-        help="Incremental fetch (watermark + last-day recheck) + HTML.",
+        help="Incremental list (watermark + last-day recheck), parse local qlogs, HTML.",
+    )
+    sub.add_parser(
+        "sync-qlogs",
+        aliases=["download-qlogs"],
+        parents=[shared],
+        help="Download missing qlogs into the local store (Comma /files, qlogs only).",
+        description=(
+            "Download missing qlogs into the local store. Skips routes already "
+            "complete on disk. Calls Comma /files (rate limit ~5/min); qlogs only, "
+            "never rlogs or cameras. Parse/backfill never hit this path."
+        ),
     )
     sub.add_parser("generate", parents=[shared], help="Rebuild index.html from the local cache only.")
     dep = sub.add_parser("deploy", parents=[shared], help="wrangler pages deploy ./site")
@@ -88,7 +102,13 @@ def main(argv: list[str] | None = None) -> int:
         format="%(asctime)s %(levelname)s %(message)s",
     )
     settings = load_settings()
-    settings = _apply_paths(settings, args.out, args.cache, demo=args.cmd == "demo")
+    settings = _apply_paths(
+        settings,
+        args.out,
+        args.cache,
+        getattr(args, "qlog_dir", None),
+        demo=args.cmd == "demo",
+    )
 
     if args.cmd == "demo":
         stats = run_demo(settings, args.fixture)
@@ -99,6 +119,16 @@ def main(argv: list[str] | None = None) -> int:
             path = generate_from_cache(settings, cache)
         print(f"wrote {path}")
         return 0
+    if args.cmd in ("sync-qlogs", "download-qlogs"):
+        stats = run_sync_qlogs(settings)
+        print(
+            f"sync-qlogs checked={stats.routes_checked} "
+            f"skipped={stats.routes_skipped_complete} "
+            f"downloaded={stats.qlogs_downloaded} "
+            f"incomplete={stats.routes_incomplete} "
+            f"failed={stats.qlogs_failed}"
+        )
+        return 0
     if args.cmd in ("backfill", "nightly"):
         stats = run_pipeline(
             settings,
@@ -108,9 +138,14 @@ def main(argv: list[str] | None = None) -> int:
         )
         extra = " metadata_only" if args.metadata_only else ""
         skip = f" cached_skip={stats.qlogs_skipped_cached}" if args.cmd == "nightly" else ""
+        missing = (
+            ""
+            if args.metadata_only
+            else f" missing_local={stats.qlogs_missing_local}"
+        )
         print(
             f"{args.cmd} listed={stats.routes_listed} parsed={stats.qlogs_parsed}"
-            f"{skip}{extra} → {stats.html_path}"
+            f"{skip}{missing}{extra} → {stats.html_path}"
         )
         return 0
     return _deploy(settings, dry_run=args.dry_run)
@@ -128,8 +163,15 @@ def _strip_verbose(argv: list[str]) -> tuple[list[str], bool]:
     return kept, verbose
 
 
-def _apply_paths(settings, out: Path | None, cache: Path | None, *, demo: bool = False):
-    """Apply --out/--cache; demo fills omitted paths with temps."""
+def _apply_paths(
+    settings,
+    out: Path | None,
+    cache: Path | None,
+    qlog_dir: Path | None = None,
+    *,
+    demo: bool = False,
+):
+    """Apply --out/--cache/--qlog-dir; demo fills omitted cache/site with temps."""
     updates = {}
     if cache is not None:
         updates["cache_path"] = cache.resolve()
@@ -139,6 +181,8 @@ def _apply_paths(settings, out: Path | None, cache: Path | None, *, demo: bool =
         updates["site_dir"] = out.resolve()
     elif demo:
         updates["site_dir"] = Path(tempfile.mkdtemp(prefix="op-usage-demo-site-"))
+    if qlog_dir is not None:
+        updates["qlog_dir"] = qlog_dir.resolve()
     return replace(settings, **updates) if updates else settings
 
 

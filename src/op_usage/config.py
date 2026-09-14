@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 DEFAULT_CACHE = "~/.cache/op-usage/op-usage.sqlite"
+DEFAULT_QLOG_DIR = "~/.cache/op-usage/qlogs"
 DEFAULT_SITE = "./site"
 
 
@@ -53,6 +54,7 @@ class Settings:
     dongle_id: str | None
     api_base: str
     cache_path: Path
+    qlog_dir: Path
     site_dir: Path
     display_tz: str
     backfill_start: str
@@ -77,12 +79,20 @@ def default_site_dir() -> Path:
     return _expand(DEFAULT_SITE)
 
 
+def default_qlog_dir() -> Path:
+    return _expand(DEFAULT_QLOG_DIR)
+
+
 def is_live_cache_path(path: Path) -> bool:
     return path.expanduser().resolve() == default_cache_path()
 
 
 def is_live_site_dir(path: Path) -> bool:
     return path.expanduser().resolve() == default_site_dir()
+
+
+def is_live_qlog_dir(path: Path) -> bool:
+    return path.expanduser().resolve() == default_qlog_dir()
 
 
 def load_settings() -> Settings:
@@ -96,6 +106,11 @@ def load_settings() -> Settings:
         dongle_id=dongle.strip() if dongle else None,
         api_base=os.environ.get("COMMA_API_BASE", "https://api.commadotai.com").rstrip("/"),
         cache_path=_expand(os.environ.get("CACHE_PATH", DEFAULT_CACHE)),
+        qlog_dir=_expand(
+            os.environ.get("OP_USAGE_QLOG_DIR")
+            or os.environ.get("QLOG_DIR")
+            or DEFAULT_QLOG_DIR
+        ),
         site_dir=_expand(os.environ.get("SITE_DIR", DEFAULT_SITE)),
         display_tz=os.environ.get("DISPLAY_TZ", "America/Los_Angeles"),
         backfill_start=os.environ.get("BACKFILL_START", "2018-01-01"),

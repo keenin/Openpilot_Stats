@@ -132,6 +132,18 @@ def test_watermark_only_moves_forward(tmp_path) -> None:
         cache.set_watermark_ms(50)
         cache.set_watermark_ms(40)
         assert cache.watermark_ms() == 50
+
+
+def test_mark_qlog_unparsed_keeps_engaged(tmp_path) -> None:
+    with Cache(tmp_path / "c.sqlite") as cache:
+        seed_parsed(cache, engaged=12.5, not_in_park=20.0)
+        cache.mark_qlog_unparsed("d|r")
+        cache.commit()
+        row = cache.get_drive("d|r")
+        assert row is not None
+        assert row.qlog_parsed is False
+        assert row.engaged_time_s == 12.5
+        assert row.not_in_park_time_s == 20.0
         cache.set_watermark_ms(80)
         assert cache.watermark_ms() == 80
 
