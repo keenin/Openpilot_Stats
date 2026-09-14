@@ -56,6 +56,18 @@ def main(argv: list[str] | None = None) -> int:
             "cached miles without --reparse-engaged. Does not call /files."
         ),
     )
+    reparse.add_argument(
+        "--jobs",
+        type=int,
+        default=None,
+        metavar="N",
+        help=(
+            "Process-pool workers for local qlog parse. Default: min(32, CPU count) "
+            "or OP_USAGE_JOBS. --jobs 1 is serial (same as before). Workers read "
+            "disk only; sqlite writes stay in the parent. Does not parallelize "
+            "sync-qlogs or Comma listing."
+        ),
+    )
 
     demo = sub.add_parser("demo", parents=[shared], help="Generate site from fixture JSON (no JWT).")
     demo.add_argument(
@@ -97,6 +109,8 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(raw)
     if getattr(args, "metadata_only", False) and getattr(args, "reparse_engaged", False):
         parser.error("--metadata-only cannot be combined with --reparse-engaged")
+    if getattr(args, "jobs", None) is not None and args.jobs < 1:
+        parser.error("--jobs must be >= 1")
     logging.basicConfig(
         level=logging.DEBUG if (verbose or args.verbose) else logging.INFO,
         format="%(asctime)s %(levelname)s %(message)s",
@@ -109,6 +123,8 @@ def main(argv: list[str] | None = None) -> int:
         getattr(args, "qlog_dir", None),
         demo=args.cmd == "demo",
     )
+    if getattr(args, "jobs", None) is not None:
+        settings = replace(settings, parse_jobs=args.jobs)
 
     if args.cmd == "demo":
         stats = run_demo(settings, args.fixture)
@@ -143,9 +159,10 @@ def main(argv: list[str] | None = None) -> int:
             if args.metadata_only
             else f" missing_local={stats.qlogs_missing_local}"
         )
+        jobs_bit = "" if args.metadata_only else f" jobs={settings.parse_jobs}"
         print(
             f"{args.cmd} listed={stats.routes_listed} parsed={stats.qlogs_parsed}"
-            f"{skip}{missing}{extra} → {stats.html_path}"
+            f"{skip}{missing}{jobs_bit}{extra} → {stats.html_path}"
         )
         return 0
     return _deploy(settings, dry_run=args.dry_run)

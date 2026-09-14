@@ -65,6 +65,7 @@ class Settings:
     recheck_hours: int
     files_min_interval_s: float
     request_timeout_s: float
+    parse_jobs: int = 1
 
     @property
     def has_auth(self) -> bool:
@@ -95,6 +96,24 @@ def is_live_qlog_dir(path: Path) -> bool:
     return path.expanduser().resolve() == default_qlog_dir()
 
 
+def default_parse_jobs() -> int:
+    """Local qlog parse workers. `--jobs 1` is serial. Cap keeps pools bounded."""
+    return min(32, max(1, os.cpu_count() or 1))
+
+
+def parse_jobs_from_env() -> int:
+    raw = os.environ.get("OP_USAGE_JOBS")
+    if raw is None or not str(raw).strip():
+        return default_parse_jobs()
+    try:
+        n = int(str(raw).strip())
+    except ValueError:
+        raise SystemExit(f"OP_USAGE_JOBS must be an integer >= 1, got {raw!r}") from None
+    if n < 1:
+        raise SystemExit("OP_USAGE_JOBS must be >= 1")
+    return n
+
+
 def load_settings() -> Settings:
     load_credential_files()
     jwt = os.environ.get("COMMA_JWT") or None
@@ -121,4 +140,5 @@ def load_settings() -> Settings:
         recheck_hours=int(os.environ.get("RECHECK_HOURS", "24")),
         files_min_interval_s=float(os.environ.get("FILES_MIN_INTERVAL_S", "13")),
         request_timeout_s=float(os.environ.get("REQUEST_TIMEOUT_S", "60")),
+        parse_jobs=parse_jobs_from_env(),
     )
