@@ -1,6 +1,7 @@
-"""Fetch → cache engaged time → write index.html.
+"""Fetch metadata → parse local qlogs → write index.html.
 
 Incremental: watermark + 24h recheck. First run backfills from BACKFILL_START.
+Qlog blobs are read from the local store only; Comma /files is `sync-qlogs`.
 Demo/dry-run uses fixtures and never talks to comma.
 """
 
@@ -17,6 +18,7 @@ from op_usage.cache import SCHEMA_VERSION, Cache, DriveRow
 from op_usage.comma_api import CommaClient, RouteMeta, iter_time_chunks, normalize_routes
 from op_usage.config import Settings, is_live_cache_path, is_live_site_dir
 from op_usage.qlog import extract_engaged_time_from_qlogs, load_event_module
+from op_usage.qlog_store import load_drive_qlogs, list_local_segments, missing_segments, split_route_name
 from op_usage.site import render_site, write_site
 from op_usage.weights import make_weights_lookup
 
@@ -34,6 +36,7 @@ class RunStats:
     routes_listed: int = 0
     qlogs_parsed: int = 0
     qlogs_skipped_cached: int = 0
+    qlogs_missing_local: int = 0
     html_path: str = ""
 
 
@@ -216,7 +219,7 @@ def run_pipeline(
             n = cache.clear_engaged_parses(route_names=[m.route_name for m in listed])
             log.info(
                 "cleared %d cached qlog parses among %d listed routes; "
-                "will re-download and reparse (other cache rows left intact)",
+                "will re-read local qlogs (no download; other cache rows left intact)",
                 n,
                 len(listed),
             )
@@ -230,68 +233,99 @@ def run_pipeline(
         cache.commit()
 
         if metadata_only:
-            log.info("metadata-only: skipped qlog downloads for %d listed routes", len(listed))
+            log.info("metadata-only: skipped local qlog parse for %d listed routes", len(listed))
         else:
             stats.qlogs_skipped_cached = sum(
                 1 for name in listed_names if name not in need_parse
             )
-            for name in need_parse:
-                row = cache.get_drive(name)
-                if row is None:
-                    continue
-                try:
-                    urls = client.route_qlog_urls(name)
-                    blobs = [client.download_bytes(u) for u in urls]
-                    result = extract_engaged_time_from_qlogs(blobs, event_mod=event_mod)
-                    if result.sample_count == 0:
-                        log.info(
-                            "  %s empty qlog parse (samples=0); keeping last-known engaged",
-                            name,
-                        )
-                        continue
-                    # Store None when the gear integral is unusable; denominator_s
-                    # falls back to API wall-clock. Do not write 0.0 as "measured".
-                    cache.save_engaged(
-                        name,
-                        result.engaged_time_s,
-                        result.source,
-                        result.not_in_park_time_s,
-                        result.weighted_engaged_time_s,
-                        result.steady_frac,
-                        result.parser_version,
-                    )
-                    cache.commit()
-                    stats.qlogs_parsed += 1
-                    park_log = (
-                        result.not_in_park_time_s
-                        if result.not_in_park_time_s is not None
-                        else row.total_drive_time_s
-                    )
-                    log.info(
-                        "  %s engaged=%.1fs weighted=%s not_in_park=%.1fs source=%s "
-                        "samples=%d gear_samples=%d speed_samples=%d parser=%d",
-                        name,
-                        result.engaged_time_s,
-                        (
-                            f"{result.weighted_engaged_time_s:.1f}s"
-                            if result.weighted_engaged_time_s is not None
-                            else "null"
-                        ),
-                        park_log,
-                        result.source,
-                        result.sample_count,
-                        result.gear_sample_count,
-                        result.speed_sample_count,
-                        result.parser_version,
-                    )
-                except Exception as exc:
-                    log.warning("qlog parse failed for %s: %s", name, exc)
+            _parse_local_qlogs(cache, settings, need_parse, event_mod, stats)
 
         cache.mark_run()
         cache.commit()
         html_path = generate_from_cache(settings, cache)
         stats.html_path = str(html_path)
     return stats
+
+
+def _parse_local_qlogs(
+    cache: Cache,
+    settings: Settings,
+    need_parse: set[str],
+    event_mod,
+    stats: RunStats,
+) -> None:
+    """Read qlog bytes from disk only. Never calls Comma /files or CDN."""
+    for name in need_parse:
+        row = cache.get_drive(name)
+        if row is None:
+            continue
+        try:
+            blobs = load_drive_qlogs(settings.qlog_dir, row)
+            if blobs is None:
+                dongle, route_id = split_route_name(row.route_name, row.dongle_id)
+                have = list_local_segments(settings.qlog_dir, dongle, route_id)
+                missing = missing_segments(have, row.maxqlog)
+                log.warning(
+                    "qlogs missing locally for %s (qlog_dir=%s maxqlog=%s have=%s "
+                    "missing=%s); skip parse (qlogs_missing_local). "
+                    "Run: python3 -m op_usage sync-qlogs",
+                    name,
+                    settings.qlog_dir,
+                    row.maxqlog,
+                    have,
+                    missing if row.maxqlog is not None else "unknown",
+                )
+                stats.qlogs_missing_local += 1
+                if row.qlog_parsed:
+                    # maxqlog grew (or similar) but files are not here yet; keep
+                    # last-known engaged and retry after sync fills the gaps.
+                    cache.mark_qlog_unparsed(name)
+                    cache.commit()
+                continue
+            result = extract_engaged_time_from_qlogs(blobs, event_mod=event_mod)
+            if result.sample_count == 0:
+                log.info(
+                    "  %s empty qlog parse (samples=0); keeping last-known engaged",
+                    name,
+                )
+                continue
+            # Store None when the gear integral is unusable; denominator_s
+            # falls back to API wall-clock. Do not write 0.0 as "measured".
+            cache.save_engaged(
+                name,
+                result.engaged_time_s,
+                result.source,
+                result.not_in_park_time_s,
+                result.weighted_engaged_time_s,
+                result.steady_frac,
+                result.parser_version,
+            )
+            cache.commit()
+            stats.qlogs_parsed += 1
+            park_log = (
+                result.not_in_park_time_s
+                if result.not_in_park_time_s is not None
+                else row.total_drive_time_s
+            )
+            log.info(
+                "  %s engaged=%.1fs weighted=%s not_in_park=%.1fs source=%s "
+                "samples=%d gear_samples=%d speed_samples=%d parser=%d",
+                name,
+                result.engaged_time_s,
+                (
+                    f"{result.weighted_engaged_time_s:.1f}s"
+                    if result.weighted_engaged_time_s is not None
+                    else "null"
+                ),
+                park_log,
+                result.source,
+                result.sample_count,
+                result.gear_sample_count,
+                result.speed_sample_count,
+                result.parser_version,
+            )
+        except Exception as exc:
+            log.warning("qlog parse failed for %s: %s", name, exc)
 
 
 def _list_chunk(

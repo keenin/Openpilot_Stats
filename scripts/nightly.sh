@@ -16,5 +16,8 @@ if [[ -f "$CONFIG" ]]; then
   set +a
 fi
 
+# 1) metadata / list  2) download missing qlogs  3) parse local + generate
+python3 -m op_usage nightly --metadata-only -v
+python3 -m op_usage sync-qlogs -v
 python3 -m op_usage nightly -v
 "$ROOT/scripts/deploy.sh"

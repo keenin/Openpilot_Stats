@@ -177,6 +177,13 @@ class Cache:
             ),
         )
 
+    def mark_qlog_unparsed(self, route_name: str) -> None:
+        """Clear qlog_parsed so a later local parse retries. Keeps last engaged times."""
+        self._conn.execute(
+            "UPDATE drives SET qlog_parsed = 0, updated_at = ? WHERE route_name = ?",
+            (_now(), route_name),
+        )
+
     def clear_engaged_parses(self, route_names: Iterable[str] | None = None) -> int:
         """Drop cached qlog results so the next fetch re-reads those routes.
 
@@ -208,7 +215,7 @@ class Cache:
         return int(cur.rowcount or 0)
 
     def needs_qlog_parse(self, drive: DriveRow) -> bool:
-        """True if incoming API metadata still needs a qlog download.
+        """True if incoming API metadata still needs a local qlog parse.
 
         Parse only when the row is unparsed or incoming maxqlog grew.
         `drive` must be the *new* listing, compared before upsert_route_meta.
