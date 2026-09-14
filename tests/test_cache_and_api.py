@@ -71,6 +71,60 @@ def test_migrates_not_in_park_column_on_old_sqlite(tmp_path) -> None:
         assert row is not None
         assert row.engaged_time_s == 10.0
         assert row.not_in_park_time_s is None
+        assert row.weighted_engaged_time_s is None
+        assert row.parser_version is None
+
+
+def test_migrates_weighted_columns_on_schema_3(tmp_path) -> None:
+    import sqlite3
+
+    path = tmp_path / "v3.sqlite"
+    conn = sqlite3.connect(path)
+    conn.executescript(
+        """
+        CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+        CREATE TABLE drives (
+          route_name TEXT PRIMARY KEY,
+          dongle_id TEXT NOT NULL,
+          start_time_utc_ms INTEGER NOT NULL,
+          end_time_utc_ms INTEGER NOT NULL,
+          length_miles REAL NOT NULL,
+          total_drive_time_s REAL NOT NULL,
+          git_commit TEXT,
+          git_branch TEXT,
+          git_remote TEXT,
+          maxqlog INTEGER,
+          engaged_time_s REAL,
+          engaged_source TEXT,
+          not_in_park_time_s REAL,
+          qlog_parsed INTEGER NOT NULL DEFAULT 0,
+          updated_at TEXT NOT NULL
+        );
+        INSERT INTO meta(key, value) VALUES ('schema_version', '3');
+        INSERT INTO drives VALUES (
+          'd|r', 'd', 1, 2, 3.0, 100.0, 'abc', 'n', '', 1,
+          10.0, 'selfdriveState.enabled', 20.0, 1, 't'
+        );
+        """
+    )
+    conn.commit()
+    conn.close()
+    with Cache(path) as cache:
+        assert cache.schema_upgraded_from == "3"
+        assert cache.get_meta("schema_version") == SCHEMA_VERSION
+        row = cache.get_drive("d|r")
+        assert row is not None
+        assert row.engaged_time_s == 10.0
+        assert row.not_in_park_time_s == 20.0
+        assert row.weighted_engaged_time_s is None
+        assert row.steady_frac is None
+        assert row.parser_version is None
+        cache.save_engaged("d|r", 10.0, "selfdriveState.enabled", 20.0, 4.0, 0.6, 2)
+        saved = cache.get_drive("d|r")
+        assert saved is not None
+        assert saved.weighted_engaged_time_s == 4.0
+        assert saved.steady_frac == 0.6
+        assert saved.parser_version == 2
 
 
 def test_watermark_only_moves_forward(tmp_path) -> None:
@@ -92,6 +146,8 @@ def test_clear_engaged_parses_scope_and_reparse(tmp_path) -> None:
         assert wiped and not wiped.qlog_parsed
         assert wiped.engaged_time_s is None
         assert wiped.not_in_park_time_s is None
+        assert wiped.weighted_engaged_time_s is None
+        assert wiped.parser_version is None
 
         seed_parsed(cache, engaged=0.0, not_in_park=50.0, source="controlsState.enabled")
         existing = cache.get_drive("d|r")

@@ -42,10 +42,13 @@ def test_demo_html_is_table_only_qualified_commits_newest_first() -> None:
     for header in ("Branch", "Commit", "Date range", "Drives", "Miles", "Engaged time"):
         assert f"<th>{header}</th>" in html
     assert "Engage %" in html
+    assert "Weighted engaged" in html
+    assert "Weight %" in html
+    assert "steady-speed / freeway sits" in html
     assert "Updated 2026-09-11 03:00 PDT" in html
     assert "<table class=\"nested\">" in html
     assert "2026-09-10" in html
-    assert 'colspan="7"' in html
+    assert 'colspan="9"' in html
     for blob in CHROME:
         assert blob not in html
     assert "<title>Openpilot Stats</title>" in html

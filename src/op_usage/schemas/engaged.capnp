@@ -13,6 +13,10 @@
 #   SelfdriveState.enabled @1
 #   ControlsState.enabled @19
 #     (cereal nested this under deprecated :group; same ordinal / wire bit)
+#   CarState.vEgo @1 : Float32 (m/s)
+#   CarState.cruiseState @10 : CruiseState { enabled @0; speed @1 : Float32 m/s }
+#     cereal also has vCruise @53 (kph); the stub cannot pack through @53, so
+#     set-speed falls back to cruiseState.speed. cereal.log.Event can read vCruise.
 #   CarState.gearShifter @14 : GearShifter
 #     unknown @0, park @1, drive @2, neutral @3, reverse @4,
 #     sport @5, low @6, brake @7, eco @8, manumatic @9
@@ -44,6 +48,13 @@ enum GearShifter {
   manumatic @9;
 }
 
+# cereal/opendbc CarState.CruiseState: enabled @0, speed @1 (m/s).
+# Pointer slot @10 on CarState; extra cereal fields are ignored when reading.
+struct CruiseState {
+  enabled @0 :Bool;
+  speed @1 :Float32;
+}
+
 struct CarState {
   # Placeholders @0–@13 match cereal/opendbc CarState types so gearShifter @14
   # packs at the same data-section offset. Void would leave a hole (illegal)
@@ -58,7 +69,7 @@ struct CarState {
   steeringAngleDeg @7 :Float32;
   steeringTorque @8 :Float32;
   steeringPressed @9 :Bool;
-  cruiseState @10 :AnyPointer;
+  cruiseState @10 :CruiseState;
   buttonEvents @11 :AnyPointer;
   canMonoTimes @12 :AnyPointer;
   events @13 :AnyPointer;

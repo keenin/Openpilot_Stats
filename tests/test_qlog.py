@@ -7,6 +7,7 @@ import capnp
 from op_usage.qlog import (
     CONTROLS_SOURCE,
     GEAR_SOURCE,
+    PARSER_VERSION,
     SELFDRIVE_SOURCE,
     EnabledSample,
     encode_synthetic_qlog,
@@ -17,6 +18,7 @@ from op_usage.qlog import (
     _gear_is_park,
     _load_stub_schema,
 )
+from op_usage.steady import MS_TO_MPH
 
 NS = 1_000_000_000
 
@@ -148,6 +150,8 @@ def test_roundtrip_synthetic_qlog_bz2() -> None:
     result = extract_engaged_time(blob)
     assert result.source == SELFDRIVE_SOURCE
     assert abs(result.engaged_time_s - 5.0) < 1e-6
+    assert result.weighted_engaged_time_s is None
+    assert result.parser_version == PARSER_VERSION
 
 
 def test_controls_state_fallback_on_synthetic_qlog() -> None:
@@ -229,6 +233,7 @@ def test_extract_not_in_park_and_missing_car_state() -> None:
     missing = extract_engaged_time(encode_synthetic_qlog(_samples([(2.0, True)]), compress=None))
     assert missing.not_in_park_time_s is None
     assert missing.gear_sample_count == 0
+    assert missing.weighted_engaged_time_s is None
 
 
 def test_park_integral_zero_or_single_sample_is_missing() -> None:
@@ -340,3 +345,38 @@ struct Event {{
     assert result.gear_source == GEAR_SOURCE
     assert result.not_in_park_time_s is not None
     assert abs(result.not_in_park_time_s - 6.0) < 1e-6
+
+
+def _mph_samples(duration_s: float, mph: float, dt: float = 1.0) -> list[EnabledSample]:
+    v_ms = mph / MS_TO_MPH
+    out: list[EnabledSample] = []
+    t = 0.0
+    while t <= duration_s + 1e-9:
+        ns = int(round(t * NS))
+        out.append(EnabledSample(ns, True, SELFDRIVE_SOURCE))
+        out.append(
+            EnabledSample(
+                ns,
+                True,
+                GEAR_SOURCE,
+                v_ego_ms=v_ms,
+                cruise_speed_ms=v_ms,
+            )
+        )
+        t += dt
+    return out
+
+
+def test_weighted_from_vego_and_null_without_speed() -> None:
+    result = extract_engaged_time(encode_synthetic_qlog(_mph_samples(10.0, 70.0), compress=None))
+    assert result.engaged_time_s > 0
+    assert result.weighted_engaged_time_s is not None
+    assert abs(result.weighted_engaged_time_s - result.engaged_time_s) < 0.5
+    assert result.speed_sample_count > 0
+    assert result.parser_version == PARSER_VERSION
+    assert result.steady_frac is not None
+    assert result.steady_frac < 0.05
+    missing = extract_engaged_time(encode_synthetic_qlog(_samples([(8.0, True)]), compress=None))
+    assert missing.engaged_time_s > 0
+    assert missing.weighted_engaged_time_s is None
+    assert missing.steady_frac is None

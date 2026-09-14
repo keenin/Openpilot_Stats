@@ -75,6 +75,17 @@ def load_fixture_drives(path: Path) -> list[DriveRow]:
                     if item.get("not_in_park_time_s") is None
                     else float(item["not_in_park_time_s"])
                 ),
+                weighted_engaged_time_s=(
+                    None
+                    if item.get("weighted_engaged_time_s") is None
+                    else float(item["weighted_engaged_time_s"])
+                ),
+                steady_frac=(
+                    None if item.get("steady_frac") is None else float(item["steady_frac"])
+                ),
+                parser_version=(
+                    None if item.get("parser_version") is None else int(item["parser_version"])
+                ),
             )
         )
     return drives
@@ -139,7 +150,7 @@ def run_pipeline(
             log.warning(
                 "cache schema_version %s → %s; cached qlog rows will not "
                 "reparse unless you pass --reparse-engaged (or SQL-clear qlog_parsed). "
-                "Engage %% needs not_in_park_time_s from a reparse.",
+                "Weighted engaged time needs a reparse of routes that predate parser v2.",
                 cache.schema_upgraded_from,
                 SCHEMA_VERSION,
             )
@@ -245,6 +256,9 @@ def run_pipeline(
                         result.engaged_time_s,
                         result.source,
                         result.not_in_park_time_s,
+                        result.weighted_engaged_time_s,
+                        result.steady_frac,
+                        result.parser_version,
                     )
                     cache.commit()
                     stats.qlogs_parsed += 1
@@ -254,14 +268,21 @@ def run_pipeline(
                         else row.total_drive_time_s
                     )
                     log.info(
-                        "  %s engaged=%.1fs not_in_park=%.1fs source=%s "
-                        "samples=%d gear_samples=%d",
+                        "  %s engaged=%.1fs weighted=%s not_in_park=%.1fs source=%s "
+                        "samples=%d gear_samples=%d speed_samples=%d parser=%d",
                         name,
                         result.engaged_time_s,
+                        (
+                            f"{result.weighted_engaged_time_s:.1f}s"
+                            if result.weighted_engaged_time_s is not None
+                            else "null"
+                        ),
                         park_log,
                         result.source,
                         result.sample_count,
                         result.gear_sample_count,
+                        result.speed_sample_count,
+                        result.parser_version,
                     )
                 except Exception as exc:
                     log.warning("qlog parse failed for %s: %s", name, exc)

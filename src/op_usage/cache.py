@@ -18,7 +18,7 @@ from typing import Iterable, Iterator
 from op_usage import MIN_MILES
 from op_usage.config import is_live_cache_path
 
-SCHEMA_VERSION = "3"  # not_in_park_time_s; does not auto-clear qlog rows
+SCHEMA_VERSION = "4"  # weighted_engaged_time_s; does not auto-clear qlog rows
 
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS meta (
@@ -40,6 +40,9 @@ CREATE TABLE IF NOT EXISTS drives (
   engaged_time_s REAL,
   engaged_source TEXT,
   not_in_park_time_s REAL,
+  weighted_engaged_time_s REAL,
+  steady_frac REAL,
+  parser_version INTEGER,
   qlog_parsed INTEGER NOT NULL DEFAULT 0,
   updated_at TEXT NOT NULL
 );
@@ -74,6 +77,9 @@ class DriveRow:
     qlog_parsed: bool
     updated_at: str = ""
     not_in_park_time_s: float | None = None
+    weighted_engaged_time_s: float | None = None
+    steady_frac: float | None = None
+    parser_version: int | None = None
 
 
 class Cache:
@@ -95,6 +101,12 @@ class Cache:
         cols = {str(row[1]) for row in self._conn.execute("PRAGMA table_info(drives)")}
         if "not_in_park_time_s" not in cols:
             self._conn.execute("ALTER TABLE drives ADD COLUMN not_in_park_time_s REAL")
+        if "weighted_engaged_time_s" not in cols:
+            self._conn.execute("ALTER TABLE drives ADD COLUMN weighted_engaged_time_s REAL")
+        if "steady_frac" not in cols:
+            self._conn.execute("ALTER TABLE drives ADD COLUMN steady_frac REAL")
+        if "parser_version" not in cols:
+            self._conn.execute("ALTER TABLE drives ADD COLUMN parser_version INTEGER")
 
     def close(self) -> None:
         self._conn.close()
@@ -141,15 +153,28 @@ class Cache:
         engaged_time_s: float,
         engaged_source: str,
         not_in_park_time_s: float | None = None,
+        weighted_engaged_time_s: float | None = None,
+        steady_frac: float | None = None,
+        parser_version: int | None = None,
     ) -> None:
         self._conn.execute(
             """
             UPDATE drives SET
               engaged_time_s = ?, engaged_source = ?, not_in_park_time_s = ?,
+              weighted_engaged_time_s = ?, steady_frac = ?, parser_version = ?,
               qlog_parsed = 1, updated_at = ?
             WHERE route_name = ?
             """,
-            (engaged_time_s, engaged_source, not_in_park_time_s, _now(), route_name),
+            (
+                engaged_time_s,
+                engaged_source,
+                not_in_park_time_s,
+                weighted_engaged_time_s,
+                steady_frac,
+                parser_version,
+                _now(),
+                route_name,
+            ),
         )
 
     def clear_engaged_parses(self, route_names: Iterable[str] | None = None) -> int:
@@ -164,6 +189,9 @@ class Cache:
               engaged_time_s = NULL,
               engaged_source = NULL,
               not_in_park_time_s = NULL,
+              weighted_engaged_time_s = NULL,
+              steady_frac = NULL,
+              parser_version = NULL,
               updated_at = ?
         """
         if route_names is None:
@@ -269,8 +297,9 @@ INSERT INTO drives (
   route_name, dongle_id, start_time_utc_ms, end_time_utc_ms,
   length_miles, total_drive_time_s, git_commit, git_branch, git_remote,
   maxqlog, engaged_time_s, engaged_source, not_in_park_time_s,
+  weighted_engaged_time_s, steady_frac, parser_version,
   qlog_parsed, updated_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 """
 
 # Last-known-good: blank incoming git_* does not clobber a cached value.
@@ -314,6 +343,9 @@ def _drive_values(drive: DriveRow, qlog_parsed: int) -> tuple:
         drive.engaged_time_s,
         drive.engaged_source,
         drive.not_in_park_time_s,
+        drive.weighted_engaged_time_s,
+        drive.steady_frac,
+        drive.parser_version,
         qlog_parsed,
         _now(),
     )
@@ -321,6 +353,10 @@ def _drive_values(drive: DriveRow, qlog_parsed: int) -> tuple:
 
 def _row_to_drive(row: sqlite3.Row) -> DriveRow:
     raw_park = row["not_in_park_time_s"]
+    keys = row.keys()
+    raw_weighted = row["weighted_engaged_time_s"] if "weighted_engaged_time_s" in keys else None
+    raw_frac = row["steady_frac"] if "steady_frac" in keys else None
+    raw_ver = row["parser_version"] if "parser_version" in keys else None
     return DriveRow(
         route_name=row["route_name"],
         dongle_id=row["dongle_id"],
@@ -337,4 +373,7 @@ def _row_to_drive(row: sqlite3.Row) -> DriveRow:
         qlog_parsed=bool(row["qlog_parsed"]),
         updated_at=row["updated_at"] or "",
         not_in_park_time_s=None if raw_park is None else float(raw_park),
+        weighted_engaged_time_s=None if raw_weighted is None else float(raw_weighted),
+        steady_frac=None if raw_frac is None else float(raw_frac),
+        parser_version=None if raw_ver is None else int(raw_ver),
     )
