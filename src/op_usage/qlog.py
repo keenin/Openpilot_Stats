@@ -14,9 +14,13 @@ Fields used:
             cereal GearShifter.park @1 (opendbc car.capnp). Only `park` is
             excluded from the engage-% denominator; unknown and every other
             gear count as not-in-park. parkingBrake is a different signal.
+  Speed   carState.vEgo            (m/s → mph) while engaged, for weighted time
+  Set     carState.vCruise (kph) if the reader schema has it; else
+          carState.cruiseState.speed (m/s). 255 kph is unset.
 
 Engage time and not-in-park time are integrals over logMonoTime (nanoseconds),
 not sample counts. Gaps larger than MAX_GAP_S are skipped (segment holes).
+Weighted engaged time applies the steady-speed nerf to enabled spans only.
 
 If an openpilot checkout is on OPENPILOT_PATH, cereal.log.Event is used.
 Otherwise the bundled stub schema (schemas/engaged.capnp) is used. The stub
@@ -36,7 +40,12 @@ from typing import Any, Iterable, Iterator
 
 import zstandard as zstd
 
+from op_usage.steady import MS_TO_MPH, Tick, set_speed_mph, weighted_engaged_seconds
+
 log = logging.getLogger(__name__)
+
+# Bumped when the qlog → sqlite mapping changes (weighted engaged time).
+PARSER_VERSION = 2
 
 # qlogs are decimated; 5s covers typical 1–10 Hz selfdriveState without
 # counting a new ignition as engaged time.
@@ -58,6 +67,16 @@ class EnabledSample:
     log_mono_ns: int
     enabled: bool
     source: str
+    v_ego_ms: float | None = None
+    cruise_speed_ms: float | None = None
+    v_cruise_kph: float | None = None
+
+
+@dataclass(frozen=True)
+class MotionSample:
+    log_mono_ns: int
+    v_ego_ms: float | None
+    set_mph: float | None = None
 
 
 @dataclass(frozen=True)
@@ -68,6 +87,10 @@ class EngagedResult:
     not_in_park_time_s: float | None = None
     gear_sample_count: int = 0
     gear_source: str = NONE_SOURCE
+    weighted_engaged_time_s: float | None = None
+    steady_frac: float | None = None
+    parser_version: int = PARSER_VERSION
+    speed_sample_count: int = 0
 
 
 def decompress_qlog(data: bytes) -> bytes:
@@ -114,9 +137,14 @@ def extract_engaged_time_from_qlogs(blobs: Iterable[bytes], event_mod: Any | Non
     if event_mod is None:
         event_mod = load_event_module()
     samples: list[EnabledSample] = []
+    motion: list[MotionSample] = []
     for blob in blobs:
-        samples.extend(_iter_samples(decompress_qlog(blob), event_mod))
-    return _result_from_samples(samples)
+        for event in _iter_events(decompress_qlog(blob), event_mod):
+            samples.extend(_event_to_samples(event))
+            m = _event_to_motion(event)
+            if m is not None:
+                motion.append(m)
+    return _result_from_samples(samples, motion)
 
 
 def _usable_not_in_park_s(gear: list[EnabledSample], engaged_time_s: float) -> float | None:
@@ -133,10 +161,23 @@ def _usable_not_in_park_s(gear: list[EnabledSample], engaged_time_s: float) -> f
     return value
 
 
-def _result_from_samples(samples: list[EnabledSample]) -> EngagedResult:
+def _result_from_samples(
+    samples: list[EnabledSample],
+    motion: list[MotionSample] | None = None,
+) -> EngagedResult:
     chosen, source = pick_source(samples)
     gear = [s for s in samples if s.source == GEAR_SOURCE]
     engaged = engaged_seconds(chosen)
+    motion = list(motion or [])
+    weighted = None
+    if engaged > 0 and motion:
+        ticks = ticks_from_streams(chosen, motion)
+        weighted = weighted_engaged_seconds(ticks, max_gap_s=MAX_GAP_S)
+        if weighted is not None:
+            weighted = min(engaged, max(0.0, weighted))
+    steady = None
+    if weighted is not None and engaged > 0:
+        steady = 1.0 - weighted / engaged
     return EngagedResult(
         engaged_time_s=engaged,
         source=source,
@@ -144,7 +185,43 @@ def _result_from_samples(samples: list[EnabledSample]) -> EngagedResult:
         not_in_park_time_s=_usable_not_in_park_s(gear, engaged),
         gear_sample_count=len(gear),
         gear_source=GEAR_SOURCE if gear else NONE_SOURCE,
+        weighted_engaged_time_s=weighted,
+        steady_frac=steady,
+        parser_version=PARSER_VERSION,
+        speed_sample_count=sum(1 for m in motion if m.v_ego_ms is not None),
     )
+
+
+def ticks_from_streams(enabled: list[EnabledSample], motion: list[MotionSample]) -> list[Tick]:
+    """Join enabled flags with last-known vEgo / set speed."""
+    events: list[tuple[int, int, str, object]] = []
+    for sample in enabled:
+        events.append((sample.log_mono_ns, 1, "en", sample.enabled))
+    for sample in motion:
+        events.append((sample.log_mono_ns, 0, "mo", sample))
+    events.sort()
+    flag = False
+    speed_mph: float | None = None
+    set_mph: float | None = None
+    ticks: list[Tick] = []
+    last_t: float | None = None
+    for t_ns, _ord, kind, payload in events:
+        if kind == "mo":
+            m = payload  # type: MotionSample
+            if m.v_ego_ms is not None:
+                speed_mph = m.v_ego_ms * MS_TO_MPH
+            if m.set_mph is not None:
+                set_mph = m.set_mph
+        else:
+            flag = bool(payload)
+        t_s = t_ns / NS
+        tick = Tick(t_s=t_s, enabled=flag, speed_mph=speed_mph, set_mph=set_mph)
+        if last_t is not None and t_s == last_t and ticks:
+            ticks[-1] = tick
+        else:
+            ticks.append(tick)
+            last_t = t_s
+    return ticks
 
 
 def load_event_module(openpilot_path: Path | None = None, cereal_path: Path | None = None) -> Any:
@@ -157,7 +234,7 @@ def load_event_module(openpilot_path: Path | None = None, cereal_path: Path | No
     log.info(
         "qlog parser: using bundled stub schema "
         "(Event.valid @67, selfdriveState @130, controlsState.enabled @19, "
-        "carState.gearShifter @22/@14 park@1)"
+        "carState.vEgo @1, cruiseState.speed @10/@1, gearShifter @22/@14 park@1)"
     )
     return stub
 
@@ -187,7 +264,7 @@ def _load_stub_schema() -> Any:
     return capnp.load(str(schema)).Event
 
 
-def _iter_samples(decompressed: bytes, event_cls: Any) -> Iterator[EnabledSample]:
+def _iter_events(decompressed: bytes, event_cls: Any) -> Iterator[Any]:
     try:
         events = event_cls.read_multiple_bytes(decompressed)
     except Exception:
@@ -195,11 +272,15 @@ def _iter_samples(decompressed: bytes, event_cls: Any) -> Iterator[EnabledSample
         return
     try:
         for event in events:
-            for sample in _event_to_samples(event):
-                yield sample
+            yield event
     except Exception as exc:
         # Trailing corruption is common in truncated uploads.
         log.warning("stopped reading qlog events early: %s", exc)
+
+
+def _iter_samples(decompressed: bytes, event_cls: Any) -> Iterator[EnabledSample]:
+    for event in _iter_events(decompressed, event_cls):
+        yield from _event_to_samples(event)
 
 
 def _event_to_samples(event: Any) -> list[EnabledSample]:
@@ -222,6 +303,34 @@ def _event_to_samples(event: Any) -> list[EnabledSample]:
     if flag is None:
         return []
     return [EnabledSample(mono, flag, source)]
+
+
+def _event_to_motion(event: Any) -> MotionSample | None:
+    try:
+        if event.which() != "carState":
+            return None
+        mono = int(event.logMonoTime)
+        car = event.carState
+    except Exception:
+        return None
+    v_ego = _read_float(car, "vEgo")
+    v_cruise = _read_float(car, "vCruise")
+    cruise_ms = None
+    try:
+        cruise_ms = _read_float(car.cruiseState, "speed")
+    except Exception:
+        cruise_ms = None
+    set_mph = set_speed_mph(v_cruise, cruise_ms)
+    if v_ego is None and set_mph is None:
+        return None
+    return MotionSample(mono, v_ego, set_mph)
+
+
+def _read_float(obj: Any, name: str) -> float | None:
+    try:
+        return float(getattr(obj, name))
+    except Exception:
+        return None
 
 
 def _read_enabled(obj: Any) -> bool | None:
@@ -280,6 +389,15 @@ def encode_synthetic_qlog(
         elif sample.source == GEAR_SOURCE:
             car = msg.init("carState")
             car.gearShifter = "drive" if sample.enabled else "park"
+            if sample.v_ego_ms is not None:
+                car.vEgo = float(sample.v_ego_ms)
+            if sample.cruise_speed_ms is not None:
+                car.cruiseState.speed = float(sample.cruise_speed_ms)
+            if sample.v_cruise_kph is not None:
+                try:
+                    car.vCruise = float(sample.v_cruise_kph)
+                except Exception:
+                    pass
         else:
             ss = msg.init("selfdriveState")
             ss.enabled = sample.enabled

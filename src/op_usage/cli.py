@@ -38,9 +38,10 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help=(
             "Clear cached qlog parses for routes this run will list "
-            "(engaged_time_s, not_in_park_time_s, including zeros) and re-read "
-            "those qlogs. Does not wipe routes outside the fetch window. "
-            "After an interrupted run, resume with plain backfill/nightly."
+            "(engaged_time_s, not_in_park_time_s, weighted_engaged_time_s, "
+            "including zeros) and re-read those qlogs. Does not wipe routes "
+            "outside the fetch window. After an interrupted run, resume with "
+            "plain backfill/nightly. Needed once after the weighted-time schema bump."
         ),
     )
     reparse.add_argument(
