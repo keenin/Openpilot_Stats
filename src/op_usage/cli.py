@@ -44,7 +44,7 @@ def main(argv: list[str] | None = None) -> int:
             "including zeros) and re-read those qlogs from the local store. "
             "Does not download from Comma. Does not wipe routes outside the "
             "fetch window. After an interrupted run, resume with plain "
-            "backfill/nightly. Needed once after the weighted-time schema bump."
+            "backfill/nightly."
         ),
     )
     reparse.add_argument(

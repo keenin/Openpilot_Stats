@@ -115,20 +115,12 @@ def _commit_block(commit: CommitRow, tz: ZoneInfo) -> str:
         <td class="num">{format_miles(commit.total_miles)}</td>
         <td class="num">{format_duration(commit.engaged_time_s)}</td>
         <td class="num pct">{format_pct(commit.engage_pct)}</td>
-        <td class="num">{_fmt_weighted(commit.weighted_engaged_time_s)}</td>
-        <td class="num">{_fmt_weight_pct(commit.weight_pct)}</td>
       </tr>
       <tr class="detail" hidden>
-        <td colspan="9">
+        <td colspan="7">
           <table class="nested">
             <thead>
-              <tr>
-                <th>Drive</th>
-                <th>Miles</th>
-                <th title="engaged time / time not in Park">Engage %</th>
-                <th>Weighted engaged</th>
-                <th title="weighted engaged / raw engaged">Weight %</th>
-              </tr>
+              <tr><th>Drive</th><th>Miles</th><th title="engaged time / time not in Park">Engage %</th></tr>
             </thead>
             <tbody>
               {nested}
@@ -140,26 +132,12 @@ def _commit_block(commit: CommitRow, tz: ZoneInfo) -> str:
     """
 
 
-def _fmt_weighted(seconds: float | None) -> str:
-    if seconds is None:
-        return "—"
-    return format_duration(seconds)
-
-
-def _fmt_weight_pct(pct: float | None) -> str:
-    if pct is None:
-        return "—"
-    return format_pct(pct)
-
-
 def _drive_row(drive: DriveView, tz: ZoneInfo) -> str:
     return (
         f"<tr>"
         f"<td>{html.escape(format_drive_date(drive.start_time_utc_ms, tz))}</td>"
         f"<td class='num'>{format_miles(drive.length_miles)}</td>"
         f"<td class='num'>{format_pct(drive.engage_pct)}</td>"
-        f"<td class='num'>{_fmt_weighted(drive.weighted_engaged_time_s)}</td>"
-        f"<td class='num'>{_fmt_weight_pct(drive.weight_pct)}</td>"
         f"</tr>"
     )
 
@@ -274,13 +252,10 @@ _PAGE = """<!DOCTYPE html>
           <th>Miles</th>
           <th>Engaged time</th>
           <th title="engaged time / time not in Park">Engage %</th>
-          <th>Weighted engaged</th>
-          <th title="weighted engaged / raw engaged">Weight %</th>
         </tr>
       </thead>
       {rows}
     </table>
-    <p class="updated">Weighted time discounts long steady-speed / freeway sits so those drives don’t dominate.</p>
     <p class="updated">Updated {stamp}</p>
   </main>
   <script>
