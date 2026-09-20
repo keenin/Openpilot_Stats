@@ -41,14 +41,19 @@ def test_demo_html_is_table_only_qualified_commits_newest_first() -> None:
     assert "18.4" in html
     for header in ("Branch", "Commit", "Date range", "Drives", "Miles", "Engaged time"):
         assert f"<th>{header}</th>" in html
+    assert ">Override</th>" in html
     assert "Engage %" in html
+    assert "Override %" not in html
     assert "Weighted engaged" not in html
     assert "Weight %" not in html
     assert "steady-speed / freeway sits" not in html
     assert "Updated 2026-09-11 03:00 PDT" in html
+    assert "selfdriveState.overriding" in html
     assert "<table class=\"nested\">" in html
     assert "2026-09-10" in html
-    assert 'colspan="7"' in html
+    assert 'colspan="8"' in html
+    assert "1m 28s" in html
+    assert "4m 17s" in html
     for blob in CHROME:
         assert blob not in html
     assert "<title>Openpilot Stats</title>" in html

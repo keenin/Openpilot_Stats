@@ -117,6 +117,9 @@ def load_fixture_drives(path: Path) -> list[DriveRow]:
                 parser_version=(
                     None if item.get("parser_version") is None else int(item["parser_version"])
                 ),
+                override_time_s=(
+                    None if item.get("override_time_s") is None else float(item["override_time_s"])
+                ),
             )
         )
     return drives
@@ -473,6 +476,7 @@ def _commit_parse_outcome(
         result.weighted_engaged_time_s,
         result.steady_frac,
         result.parser_version,
+        result.override_time_s,
     )
     cache.commit()
     stats.qlogs_parsed += 1
@@ -482,11 +486,16 @@ def _commit_parse_outcome(
         else outcome.total_drive_time_s
     )
     log.info(
-        "%s%s engaged=%.1fs weighted=%s not_in_park=%.1fs source=%s "
+        "%s%s engaged=%.1fs override=%s weighted=%s not_in_park=%.1fs source=%s "
         "samples=%d gear_samples=%d speed_samples=%d parser=%d",
         prefix,
         name,
         result.engaged_time_s,
+        (
+            f"{result.override_time_s:.1f}s"
+            if result.override_time_s is not None
+            else "null"
+        ),
         (
             f"{result.weighted_engaged_time_s:.1f}s"
             if result.weighted_engaged_time_s is not None

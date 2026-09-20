@@ -454,6 +454,8 @@ def test_parse_uses_local_files_not_client(tmp_path, monkeypatch) -> None:
     row = _get(settings, ROUTE["fullname"])
     assert row is not None and row.qlog_parsed
     assert row.engaged_time_s is not None and row.engaged_time_s > 0
+    assert row.override_time_s is not None
+    assert abs(row.override_time_s - 0.0) < 1e-6
 
 
 def test_incomplete_local_skips_and_retries_after_fill(tmp_path, monkeypatch) -> None:
@@ -553,6 +555,7 @@ def _engaged_fields(row):
         row.not_in_park_time_s,
         row.steady_frac,
         row.parser_version,
+        row.override_time_s,
         row.engaged_source,
         row.qlog_parsed,
     )

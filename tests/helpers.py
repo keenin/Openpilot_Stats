@@ -27,9 +27,18 @@ def drive_row(**kwargs) -> DriveRow:
     return DriveRow(**row)
 
 
-def seed_parsed(cache, route_name="d|r", *, engaged=12.5, not_in_park=None, source="selfdriveState.enabled", **meta) -> None:
+def seed_parsed(
+    cache,
+    route_name="d|r",
+    *,
+    engaged=12.5,
+    not_in_park=None,
+    source="selfdriveState.enabled",
+    override=None,
+    **meta,
+) -> None:
     cache.upsert_route_meta(drive_row(route_name=route_name, qlog_parsed=False, engaged_time_s=None, **meta))
-    cache.save_engaged(route_name, engaged, source, not_in_park)
+    cache.save_engaged(route_name, engaged, source, not_in_park, override_time_s=override)
 
 
 def seed_local_qlogs(

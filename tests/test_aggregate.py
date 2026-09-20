@@ -80,6 +80,7 @@ def test_date_range_totals_and_branch_from_last_drive() -> None:
     assert row.last_drive_ms == 5000
     assert row.total_miles == 9
     assert row.engaged_time_s == 60
+    assert row.override_time_s == 0.0
     assert row.engage_pct == 20.0
     assert row.git_branch == "renamed-nightly"
 
@@ -146,6 +147,27 @@ def test_engage_pct_ignores_weighted_sqlite_fields() -> None:
     assert row.drives[0].engage_pct == 90.0
     assert not hasattr(row, "weighted_engaged_time_s")
     assert not hasattr(row, "weight_pct")
+
+
+def test_override_sums_without_changing_engage_pct() -> None:
+    group = [
+        drive_row(
+            route_name=f"o{i}",
+            git_commit="ovov",
+            start_time_utc_ms=1000 + i,
+            engaged_time_s=1800,
+            total_drive_time_s=3600,
+            not_in_park_time_s=2000,
+            override_time_s=10.0 if i < 2 else None,
+        )
+        for i in range(3)
+    ]
+    row = aggregate_commits(group)[0]
+    assert row.override_time_s == 20.0
+    assert abs(row.engage_pct - 90.0) < 1e-9
+    assert row.drives[0].engage_pct == 90.0
+    assert row.engaged_time_s == 5400
+    assert not hasattr(row.drives[0], "override_time_s")
 
 
 def test_non_master_stays_one_row_per_sha_even_with_lookup() -> None:

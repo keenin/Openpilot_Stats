@@ -10,10 +10,12 @@ from op_usage.qlog import (
     PARSER_VERSION,
     SELFDRIVE_SOURCE,
     EnabledSample,
+    StateSample,
     encode_synthetic_qlog,
     engaged_seconds,
     extract_engaged_time,
     load_event_module,
+    override_seconds,
     pick_source,
     _gear_is_park,
     _load_stub_schema,
@@ -133,6 +135,51 @@ def test_integral_counts_enabled_spans_and_skips_gaps() -> None:
     assert engaged_seconds(gap, max_gap_s=5.0) == 0.0
 
 
+def _state_trace(pattern: list[tuple[float, int]], dt: float = 1.0) -> list[StateSample]:
+    out: list[StateSample] = []
+    t = 0.0
+    for duration, state in pattern:
+        end = t + duration
+        while t < end - 1e-9:
+            out.append(StateSample(int(round(t * NS)), state))
+            t += dt
+    out.append(StateSample(int(round(t * NS)), 0))
+    return out
+
+
+def test_override_flat_enabled_is_zero() -> None:
+    samples = _state_trace([(10.0, 2)])
+    assert abs(override_seconds(samples) - 0.0) < 1e-6
+
+
+def test_override_flat_overriding_counts_span() -> None:
+    samples = _state_trace([(8.0, 4)])
+    assert abs(override_seconds(samples) - 8.0) < 1e-6
+
+
+def test_override_mix_counts_only_overriding_blips() -> None:
+    samples = _state_trace([(5.0, 2), (2.0, 4), (3.0, 2), (1.0, 4), (4.0, 2)])
+    assert abs(override_seconds(samples) - 3.0) < 1e-6
+
+
+def test_override_skips_gaps_larger_than_max() -> None:
+    gap = [
+        StateSample(0, 4),
+        StateSample(int(20 * NS), 4),
+    ]
+    assert override_seconds(gap, max_gap_s=5.0) == 0.0
+    tight = [
+        StateSample(0, 4),
+        StateSample(int(2 * NS), 4),
+    ]
+    assert abs(override_seconds(tight, max_gap_s=5.0) - 2.0) < 1e-6
+
+
+def test_override_pre_enabled_is_not_counted() -> None:
+    samples = _state_trace([(10.0, 1)])
+    assert abs(override_seconds(samples) - 0.0) < 1e-6
+
+
 def test_selfdrive_state_wins_over_controls() -> None:
     mixed = [
         EnabledSample(0, True, CONTROLS_SOURCE),
@@ -152,12 +199,15 @@ def test_roundtrip_synthetic_qlog_bz2() -> None:
     assert abs(result.engaged_time_s - 5.0) < 1e-6
     assert result.weighted_engaged_time_s is None
     assert result.parser_version == PARSER_VERSION
+    assert result.override_time_s is not None
+    assert abs(result.override_time_s - 0.0) < 1e-6
 
 
 def test_controls_state_fallback_on_synthetic_qlog() -> None:
     result = extract_engaged_time(encode_synthetic_qlog(_samples([(4.0, True), (1.0, True)], source=CONTROLS_SOURCE), compress=None))
     assert result.source == CONTROLS_SOURCE
     assert abs(result.engaged_time_s - 5.0) < 1e-6
+    assert result.override_time_s is None
 
 
 def test_stub_schema_keeps_valid_out_of_union() -> None:
@@ -380,3 +430,35 @@ def test_weighted_from_vego_and_null_without_speed() -> None:
     assert missing.engaged_time_s > 0
     assert missing.weighted_engaged_time_s is None
     assert missing.steady_frac is None
+    assert missing.override_time_s is not None
+    assert abs(missing.override_time_s - 0.0) < 1e-6
+
+
+def _ss_state_samples(pattern: list[tuple[float, int]], dt: float = 1.0) -> list[EnabledSample]:
+    out: list[EnabledSample] = []
+    t = 0.0
+    for duration, state in pattern:
+        end = t + duration
+        enabled = state in (2, 3, 4)
+        while t < end - 1e-9:
+            out.append(EnabledSample(int(round(t * NS)), enabled, SELFDRIVE_SOURCE, state=state))
+            t += dt
+    out.append(EnabledSample(int(round(t * NS)), False, SELFDRIVE_SOURCE, state=0))
+    return out
+
+
+def test_extract_override_from_selfdrive_state() -> None:
+    mix = encode_synthetic_qlog(_ss_state_samples([(4.0, 2), (3.0, 4), (2.0, 2)]), compress=None)
+    result = extract_engaged_time(mix)
+    assert result.source == SELFDRIVE_SOURCE
+    assert abs(result.engaged_time_s - 9.0) < 1e-6
+    assert result.override_time_s is not None
+    assert abs(result.override_time_s - 3.0) < 1e-6
+    pre = extract_engaged_time(encode_synthetic_qlog(_ss_state_samples([(6.0, 1)]), compress=None))
+    assert pre.override_time_s is not None
+    assert abs(pre.override_time_s - 0.0) < 1e-6
+    assert abs(pre.engaged_time_s - 0.0) < 1e-6
+    single = extract_engaged_time(
+        encode_synthetic_qlog([EnabledSample(0, True, SELFDRIVE_SOURCE, state=4)], compress=None)
+    )
+    assert single.override_time_s is None

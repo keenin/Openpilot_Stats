@@ -25,6 +25,8 @@ Click the drive **count** to expand that group (date, miles, engage %). The main
 
 **Engaged time** is a qlog integral of `logMonoTime` deltas (gaps > 5s skipped): prefer `selfdriveState.enabled` (`Event` `@130`); else `controlsState.enabled` (`@19`, including `deprecated.enabled`). Bundled stub: `Event.valid @67` stays *outside* the union.
 
+**Override** is the same integral where `selfdriveState.state == 4` (`OpenpilotState.overriding`) — Connect gray while engaged, as **seconds** (not a percent of engaged). `preEnabled` (1) is not counted. No usable selfdriveState samples (older controlsState-only logs) store NULL so they do not fill commit sums with fake zeros. `--reparse-engaged` backfills existing routes after this parser bump.
+
 **Not-in-park** is `carState.gearShifter != park` with the same gap rules. Only `park` is excluded. No `carState` → API wall-clock. `parkingBrake` is unused. Cereal: `Event.carState @22`, `gearShifter @14`, `GearShifter.park @1`. A 0.0 park integral with engaged time is treated as missing (fall back to wall-clock).
 
 Per-route timing is **cached**. Nightly **lists** watermark − 24h plus in-flight / recently-ended cached drives so settling `maxqlog` growth is visible. Completed drives from the last 7 days (a Friday route whose start is outside that window) get a tiny targeted metadata re-list. **Parse never hits Comma for qlog blobs** — it reads `~/.cache/op-usage/qlogs/<dongle_id>/<route_id>/<segment>.qlog` (override `OP_USAGE_QLOG_DIR`). If a route needs parse but local files are missing or incomplete vs `maxqlog`, it is skipped (`qlogs_missing_local`) and left unparsed so a later `sync-qlogs` can fill the gap. Ancient unparsed rows are parsed from disk without widening the list window. Successful parses commit immediately (parent process; workers never write sqlite). Independent routes parse in a process pool (`--jobs` / `OP_USAGE_JOBS`, default `min(32, CPU count)`). `--jobs 1` is serial.
@@ -62,7 +64,7 @@ Clears qlog fields for **routes this run will list**, then re-reads **local** fi
 ```sql
 UPDATE drives
 SET qlog_parsed = 0, engaged_time_s = NULL, engaged_source = NULL, not_in_park_time_s = NULL,
-    weighted_engaged_time_s = NULL, steady_frac = NULL, parser_version = NULL;
+    weighted_engaged_time_s = NULL, steady_frac = NULL, parser_version = NULL, override_time_s = NULL;
 ```
 
 ### Refresh `length_miles`
@@ -162,7 +164,7 @@ sudo cp cron/op-usage.cron.example /etc/cron.d/op-usage
 
 ## Commands
 
-Default sqlite: `~/.cache/op-usage/op-usage.sqlite` (`CACHE_PATH`). Local qlogs: `~/.cache/op-usage/qlogs` (`OP_USAGE_QLOG_DIR`). Schema: `src/op_usage/cache.py` (`schema_version` 4). First run / `backfill` starts at `BACKFILL_START` (default `2018-01-01`). Bumping schema_version does **not** wipe qlog rows — use `--reparse-engaged` so old routes get engaged / not-in-park from **local** files. Parse workers: `--jobs` / `OP_USAGE_JOBS` (default `min(32, CPU count)`).
+Default sqlite: `~/.cache/op-usage/op-usage.sqlite` (`CACHE_PATH`). Local qlogs: `~/.cache/op-usage/qlogs` (`OP_USAGE_QLOG_DIR`). Schema: `src/op_usage/cache.py` (`schema_version` 5). First run / `backfill` starts at `BACKFILL_START` (default `2018-01-01`). Bumping schema_version does **not** wipe qlog rows — use `--reparse-engaged` so old routes get engaged / not-in-park / override from **local** files. Parse workers: `--jobs` / `OP_USAGE_JOBS` (default `min(32, CPU count)`).
 
 `-v` / `--verbose` works **before or after** the subcommand.
 
