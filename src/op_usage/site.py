@@ -114,10 +114,11 @@ def _commit_block(commit: CommitRow, tz: ZoneInfo) -> str:
         </td>
         <td class="num">{format_miles(commit.total_miles)}</td>
         <td class="num">{format_duration(commit.engaged_time_s)}</td>
+        <td class="num">{format_duration(commit.override_time_s)}</td>
         <td class="num pct">{format_pct(commit.engage_pct)}</td>
       </tr>
       <tr class="detail" hidden>
-        <td colspan="7">
+        <td colspan="8">
           <table class="nested">
             <thead>
               <tr><th>Drive</th><th>Miles</th><th title="engaged time / time not in Park">Engage %</th></tr>
@@ -251,12 +252,14 @@ _PAGE = """<!DOCTYPE html>
           <th>Drives</th>
           <th>Miles</th>
           <th>Engaged time</th>
+          <th title="Connect gray / selfdriveState.overriding while engaged">Override</th>
           <th title="engaged time / time not in Park">Engage %</th>
         </tr>
       </thead>
       {rows}
     </table>
     <p class="updated">Updated {stamp}</p>
+    <p class="updated">Override is Connect gray (selfdriveState.overriding) while engaged, in seconds.</p>
   </main>
   <script>
     document.querySelectorAll("button.expand").forEach(function (btn) {{

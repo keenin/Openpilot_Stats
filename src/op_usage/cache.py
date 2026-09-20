@@ -4,7 +4,8 @@ qlog_parsed=1 rows are not re-read unless incoming maxqlog grew or
 parses are explicitly cleared. The 24h end-time window is a listing
 hint (see pipeline), not a nightly re-download trigger.
 total_drive_time_s is API wall-clock; engage % uses not_in_park_time_s
-after a parse. Schema picture is in the README.
+after a parse. override_time_s is selfdriveState.overriding seconds
+(NULL when those samples are missing). Schema picture is in the README.
 """
 
 from __future__ import annotations
@@ -18,7 +19,7 @@ from typing import Iterable, Iterator
 from op_usage import MIN_MILES
 from op_usage.config import is_live_cache_path
 
-SCHEMA_VERSION = "4"  # weighted_engaged_time_s; does not auto-clear qlog rows
+SCHEMA_VERSION = "5"  # override_time_s; does not auto-clear qlog rows
 
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS meta (
@@ -43,6 +44,7 @@ CREATE TABLE IF NOT EXISTS drives (
   weighted_engaged_time_s REAL,
   steady_frac REAL,
   parser_version INTEGER,
+  override_time_s REAL,
   qlog_parsed INTEGER NOT NULL DEFAULT 0,
   updated_at TEXT NOT NULL
 );
@@ -80,6 +82,7 @@ class DriveRow:
     weighted_engaged_time_s: float | None = None
     steady_frac: float | None = None
     parser_version: int | None = None
+    override_time_s: float | None = None
 
 
 class Cache:
@@ -107,6 +110,8 @@ class Cache:
             self._conn.execute("ALTER TABLE drives ADD COLUMN steady_frac REAL")
         if "parser_version" not in cols:
             self._conn.execute("ALTER TABLE drives ADD COLUMN parser_version INTEGER")
+        if "override_time_s" not in cols:
+            self._conn.execute("ALTER TABLE drives ADD COLUMN override_time_s REAL")
 
     def close(self) -> None:
         self._conn.close()
@@ -156,12 +161,14 @@ class Cache:
         weighted_engaged_time_s: float | None = None,
         steady_frac: float | None = None,
         parser_version: int | None = None,
+        override_time_s: float | None = None,
     ) -> None:
         self._conn.execute(
             """
             UPDATE drives SET
               engaged_time_s = ?, engaged_source = ?, not_in_park_time_s = ?,
               weighted_engaged_time_s = ?, steady_frac = ?, parser_version = ?,
+              override_time_s = ?,
               qlog_parsed = 1, updated_at = ?
             WHERE route_name = ?
             """,
@@ -172,6 +179,7 @@ class Cache:
                 weighted_engaged_time_s,
                 steady_frac,
                 parser_version,
+                override_time_s,
                 _now(),
                 route_name,
             ),
@@ -199,6 +207,7 @@ class Cache:
               weighted_engaged_time_s = NULL,
               steady_frac = NULL,
               parser_version = NULL,
+              override_time_s = NULL,
               updated_at = ?
         """
         if route_names is None:
@@ -304,9 +313,9 @@ INSERT INTO drives (
   route_name, dongle_id, start_time_utc_ms, end_time_utc_ms,
   length_miles, total_drive_time_s, git_commit, git_branch, git_remote,
   maxqlog, engaged_time_s, engaged_source, not_in_park_time_s,
-  weighted_engaged_time_s, steady_frac, parser_version,
+  weighted_engaged_time_s, steady_frac, parser_version, override_time_s,
   qlog_parsed, updated_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 """
 
 # Last-known-good: blank incoming git_* does not clobber a cached value.
@@ -353,6 +362,7 @@ def _drive_values(drive: DriveRow, qlog_parsed: int) -> tuple:
         drive.weighted_engaged_time_s,
         drive.steady_frac,
         drive.parser_version,
+        drive.override_time_s,
         qlog_parsed,
         _now(),
     )
@@ -364,6 +374,7 @@ def _row_to_drive(row: sqlite3.Row) -> DriveRow:
     raw_weighted = row["weighted_engaged_time_s"] if "weighted_engaged_time_s" in keys else None
     raw_frac = row["steady_frac"] if "steady_frac" in keys else None
     raw_ver = row["parser_version"] if "parser_version" in keys else None
+    raw_override = row["override_time_s"] if "override_time_s" in keys else None
     return DriveRow(
         route_name=row["route_name"],
         dongle_id=row["dongle_id"],
@@ -383,4 +394,5 @@ def _row_to_drive(row: sqlite3.Row) -> DriveRow:
         weighted_engaged_time_s=None if raw_weighted is None else float(raw_weighted),
         steady_frac=None if raw_frac is None else float(raw_frac),
         parser_version=None if raw_ver is None else int(raw_ver),
+        override_time_s=None if raw_override is None else float(raw_override),
     )

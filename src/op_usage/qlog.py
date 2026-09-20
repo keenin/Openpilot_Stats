@@ -24,8 +24,11 @@ Fields used:
   Set     carState.vCruise (kph) if the reader schema has it; else
           carState.cruiseState.speed (m/s). 255 kph is unset.
 
-Engage time and not-in-park time are integrals over logMonoTime (nanoseconds),
-not sample counts. Gaps larger than MAX_GAP_S are skipped (segment holes).
+Engage time, override time, and not-in-park time are integrals over
+logMonoTime (nanoseconds), not sample counts. Gaps larger than MAX_GAP_S
+are skipped (segment holes). Override is selfdriveState.state == 4
+(OpenpilotState.overriding); preEnabled (1) is not counted. Missing
+selfdriveState samples store NULL override (older controlsState-only logs).
 Weighted engaged time applies the steady-speed nerf to enabled spans only.
 
 If an openpilot checkout is on OPENPILOT_PATH, cereal.log.Event is used.
@@ -50,8 +53,8 @@ from op_usage.steady import MS_TO_MPH, Tick, set_speed_mph, weighted_engaged_sec
 
 log = logging.getLogger(__name__)
 
-# Bumped when the qlog → sqlite mapping changes (weighted engaged time).
-PARSER_VERSION = 2
+# Bumped when the qlog → sqlite mapping changes (override_time_s).
+PARSER_VERSION = 3
 
 # qlogs are decimated; 5s covers typical 1–10 Hz selfdriveState without
 # counting a new ignition as engaged time.
@@ -62,6 +65,11 @@ SELFDRIVE_SOURCE = "selfdriveState.enabled"
 CONTROLS_SOURCE = "controlsState.enabled"
 GEAR_SOURCE = "carState.gearShifter"
 NONE_SOURCE = "none"
+
+# cereal log.capnp OpenpilotState: disabled=0, preEnabled=1, enabled=2,
+# softDisabling=3, overriding=4. Connect gray-while-engaged is 4 only;
+# preEnabled is also gray on device but is not driver assist/override.
+OVERRIDE_STATE = 4
 
 # cereal / opendbc CarState.GearShifter.park @1 (unknown @0, drive @2, …).
 PARK_GEAR_RAW = 1
@@ -76,6 +84,13 @@ class EnabledSample:
     v_ego_ms: float | None = None
     cruise_speed_ms: float | None = None
     v_cruise_kph: float | None = None
+    state: int | None = None
+
+
+@dataclass(frozen=True)
+class StateSample:
+    log_mono_ns: int
+    state: int
 
 
 @dataclass(frozen=True)
@@ -97,6 +112,7 @@ class EngagedResult:
     steady_frac: float | None = None
     parser_version: int = PARSER_VERSION
     speed_sample_count: int = 0
+    override_time_s: float | None = None
 
 
 def decompress_qlog(data: bytes) -> bytes:
@@ -125,6 +141,15 @@ def engaged_seconds(samples: Iterable[EnabledSample], max_gap_s: float = MAX_GAP
     return total
 
 
+def override_seconds(samples: Iterable[StateSample], max_gap_s: float = MAX_GAP_S) -> float:
+    """Integrate OpenpilotState.overriding (4). Same MAX_GAP_S skip as engaged time."""
+    flags = (
+        EnabledSample(s.log_mono_ns, int(s.state) == OVERRIDE_STATE, SELFDRIVE_SOURCE)
+        for s in samples
+    )
+    return engaged_seconds(flags, max_gap_s=max_gap_s)
+
+
 def pick_source(samples: list[EnabledSample]) -> tuple[list[EnabledSample], str]:
     """If any selfdriveState samples exist, ignore controlsState entirely."""
     for source in (SELFDRIVE_SOURCE, CONTROLS_SOURCE):
@@ -144,13 +169,17 @@ def extract_engaged_time_from_qlogs(blobs: Iterable[bytes], event_mod: Any | Non
         event_mod = load_event_module()
     samples: list[EnabledSample] = []
     motion: list[MotionSample] = []
+    states: list[StateSample] = []
     for blob in blobs:
         for event in _iter_events(decompress_qlog(blob), event_mod):
             samples.extend(_event_to_samples(event))
+            st = _event_to_state(event)
+            if st is not None:
+                states.append(st)
             m = _event_to_motion(event)
             if m is not None:
                 motion.append(m)
-    return _result_from_samples(samples, motion)
+    return _result_from_samples(samples, motion, states)
 
 
 def _usable_not_in_park_s(gear: list[EnabledSample], engaged_time_s: float) -> float | None:
@@ -167,9 +196,21 @@ def _usable_not_in_park_s(gear: list[EnabledSample], engaged_time_s: float) -> f
     return value
 
 
+def _usable_override_s(states: list[StateSample]) -> float | None:
+    """Override integral, or None when selfdriveState.state cannot be integrated.
+
+    Older controlsState-only logs have no OpenpilotState samples. Store NULL
+    so commit sums are not filled with fake zeros from those routes.
+    """
+    if len(states) < 2:
+        return None
+    return override_seconds(states)
+
+
 def _result_from_samples(
     samples: list[EnabledSample],
     motion: list[MotionSample] | None = None,
+    states: list[StateSample] | None = None,
 ) -> EngagedResult:
     chosen, source = pick_source(samples)
     gear = [s for s in samples if s.source == GEAR_SOURCE]
@@ -195,6 +236,7 @@ def _result_from_samples(
         steady_frac=steady,
         parser_version=PARSER_VERSION,
         speed_sample_count=sum(1 for m in motion if m.v_ego_ms is not None),
+        override_time_s=_usable_override_s(list(states or [])),
     )
 
 
@@ -318,6 +360,27 @@ def _event_to_samples(event: Any) -> list[EnabledSample]:
     return [EnabledSample(mono, flag, source)]
 
 
+def _event_to_state(event: Any) -> StateSample | None:
+    try:
+        if event.which() != "selfdriveState":
+            return None
+        mono = int(event.logMonoTime)
+        state = _read_state(event.selfdriveState)
+    except Exception:
+        return None
+    if state is None:
+        return None
+    return StateSample(mono, state)
+
+
+def _read_state(obj: Any) -> int | None:
+    """OpenpilotState ordinal. Stub schema is UInt16; cereal is an enum."""
+    try:
+        return int(obj.state)
+    except Exception:
+        return None
+
+
 def _event_to_motion(event: Any) -> MotionSample | None:
     try:
         if event.which() != "carState":
@@ -414,6 +477,8 @@ def encode_synthetic_qlog(
         else:
             ss = msg.init("selfdriveState")
             ss.enabled = sample.enabled
+            if sample.state is not None:
+                ss.state = int(sample.state)
         parts.append(msg.to_bytes())
     raw = b"".join(parts)
     if compress == "bz2":

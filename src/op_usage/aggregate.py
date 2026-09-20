@@ -50,6 +50,7 @@ class CommitRow:
     drive_count: int
     total_miles: float
     engaged_time_s: float
+    override_time_s: float
     not_in_park_time_s: float
     drives: list[DriveView] = field(default_factory=list)
     era_first_commit: str = ""
@@ -205,6 +206,7 @@ def _commit_row(group: list[DriveRow]) -> CommitRow:
         drive_count=len(group),
         total_miles=sum(d.length_miles for d in group),
         engaged_time_s=sum(float(d.engaged_time_s or 0.0) for d in group),
+        override_time_s=sum(float(d.override_time_s or 0.0) for d in group),
         not_in_park_time_s=sum(denominator_s(d) for d in group),
         drives=[to_drive_view(d) for d in group],
         era_first_commit=first_sha,

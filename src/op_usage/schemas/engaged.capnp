@@ -10,6 +10,7 @@
 #     carState @22            # cereal: Car.CarState (opendbc car.capnp)
 #     selfdriveState @130
 #     (placeholders through @160; cereal currently tops out at @152)
+#   SelfdriveState.state @0 :UInt16  # cereal OpenpilotState; overriding=4
 #   SelfdriveState.enabled @1
 #   ControlsState.enabled @19
 #     (cereal nested this under deprecated :group; same ordinal / wire bit)
