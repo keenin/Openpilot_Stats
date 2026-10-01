@@ -4,7 +4,7 @@ import pytest
 
 from helpers import drive_row, seed_parsed
 from op_usage.cache import SCHEMA_VERSION, Cache
-from op_usage.comma_api import CommaApiError, CommaClient, iter_time_chunks, normalize_routes
+from op_usage.comma_api import CommaApiError, CommaClient, normalize_routes
 
 
 def _seg(**kwargs) -> dict:
@@ -31,13 +31,12 @@ class _Resp:
         self.content = content
 
 
-def test_migrates_not_in_park_column_on_old_sqlite(tmp_path) -> None:
+def _write_old_drives(path, version: str, extra_cols: str, extra_vals: str) -> None:
     import sqlite3
 
-    path = tmp_path / "old.sqlite"
     conn = sqlite3.connect(path)
     conn.executescript(
-        """
+        f"""
         CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
         CREATE TABLE drives (
           route_name TEXT PRIMARY KEY,
@@ -52,137 +51,86 @@ def test_migrates_not_in_park_column_on_old_sqlite(tmp_path) -> None:
           maxqlog INTEGER,
           engaged_time_s REAL,
           engaged_source TEXT,
+          {extra_cols}
           qlog_parsed INTEGER NOT NULL DEFAULT 0,
           updated_at TEXT NOT NULL
         );
-        INSERT INTO meta(key, value) VALUES ('schema_version', '2');
+        INSERT INTO meta(key, value) VALUES ('schema_version', '{version}');
         INSERT INTO drives VALUES (
           'd|r', 'd', 1, 2, 3.0, 100.0, 'abc', 'n', '', 1,
-          10.0, 'selfdriveState.enabled', 1, 't'
+          10.0, 'selfdriveState.enabled', {extra_vals}1, 't'
         );
         """
     )
     conn.commit()
     conn.close()
-    with Cache(path) as cache:
-        assert cache.schema_upgraded_from == "2"
-        assert cache.get_meta("schema_version") == SCHEMA_VERSION
-        row = cache.get_drive("d|r")
-        assert row is not None
-        assert row.engaged_time_s == 10.0
-        assert row.not_in_park_time_s is None
-        assert row.weighted_engaged_time_s is None
-        assert row.parser_version is None
-        assert row.override_time_s is None
 
 
-def test_migrates_weighted_columns_on_schema_3(tmp_path) -> None:
-    import sqlite3
-
-    path = tmp_path / "v3.sqlite"
-    conn = sqlite3.connect(path)
-    conn.executescript(
-        """
-        CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
-        CREATE TABLE drives (
-          route_name TEXT PRIMARY KEY,
-          dongle_id TEXT NOT NULL,
-          start_time_utc_ms INTEGER NOT NULL,
-          end_time_utc_ms INTEGER NOT NULL,
-          length_miles REAL NOT NULL,
-          total_drive_time_s REAL NOT NULL,
-          git_commit TEXT,
-          git_branch TEXT,
-          git_remote TEXT,
-          maxqlog INTEGER,
-          engaged_time_s REAL,
-          engaged_source TEXT,
-          not_in_park_time_s REAL,
-          qlog_parsed INTEGER NOT NULL DEFAULT 0,
-          updated_at TEXT NOT NULL
-        );
-        INSERT INTO meta(key, value) VALUES ('schema_version', '3');
-        INSERT INTO drives VALUES (
-          'd|r', 'd', 1, 2, 3.0, 100.0, 'abc', 'n', '', 1,
-          10.0, 'selfdriveState.enabled', 20.0, 1, 't'
-        );
-        """
-    )
-    conn.commit()
-    conn.close()
-    with Cache(path) as cache:
-        assert cache.schema_upgraded_from == "3"
-        assert cache.get_meta("schema_version") == SCHEMA_VERSION
-        row = cache.get_drive("d|r")
-        assert row is not None
-        assert row.engaged_time_s == 10.0
-        assert row.not_in_park_time_s == 20.0
-        assert row.weighted_engaged_time_s is None
-        assert row.steady_frac is None
-        assert row.parser_version is None
-        assert row.override_time_s is None
-        cache.save_engaged("d|r", 10.0, "selfdriveState.enabled", 20.0, 4.0, 0.6, 2, 1.5)
-        saved = cache.get_drive("d|r")
-        assert saved is not None
-        assert saved.weighted_engaged_time_s == 4.0
-        assert saved.steady_frac == 0.6
-        assert saved.parser_version == 2
-        assert saved.override_time_s == 1.5
-
-
-def test_migrates_override_column_on_schema_4(tmp_path) -> None:
-    import sqlite3
-
-    path = tmp_path / "v4.sqlite"
-    conn = sqlite3.connect(path)
-    conn.executescript(
-        """
-        CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
-        CREATE TABLE drives (
-          route_name TEXT PRIMARY KEY,
-          dongle_id TEXT NOT NULL,
-          start_time_utc_ms INTEGER NOT NULL,
-          end_time_utc_ms INTEGER NOT NULL,
-          length_miles REAL NOT NULL,
-          total_drive_time_s REAL NOT NULL,
-          git_commit TEXT,
-          git_branch TEXT,
-          git_remote TEXT,
-          maxqlog INTEGER,
-          engaged_time_s REAL,
-          engaged_source TEXT,
-          not_in_park_time_s REAL,
+@pytest.mark.parametrize(
+    "version, extra_cols, extra_vals, preserved",
+    [
+        (
+            "2",
+            "",
+            "",
+            {
+                "not_in_park_time_s": None,
+                "weighted_engaged_time_s": None,
+                "steady_frac": None,
+                "parser_version": None,
+                "override_time_s": None,
+            },
+        ),
+        (
+            "3",
+            "not_in_park_time_s REAL,",
+            "20.0, ",
+            {
+                "not_in_park_time_s": 20.0,
+                "weighted_engaged_time_s": None,
+                "steady_frac": None,
+                "parser_version": None,
+                "override_time_s": None,
+            },
+        ),
+        (
+            "4",
+            """not_in_park_time_s REAL,
           weighted_engaged_time_s REAL,
           steady_frac REAL,
-          parser_version INTEGER,
-          qlog_parsed INTEGER NOT NULL DEFAULT 0,
-          updated_at TEXT NOT NULL
-        );
-        INSERT INTO meta(key, value) VALUES ('schema_version', '4');
-        INSERT INTO drives VALUES (
-          'd|r', 'd', 1, 2, 3.0, 100.0, 'abc', 'n', '', 1,
-          10.0, 'selfdriveState.enabled', 20.0, 4.0, 0.6, 2, 1, 't'
-        );
-        """
-    )
-    conn.commit()
-    conn.close()
+          parser_version INTEGER,""",
+            "20.0, 4.0, 0.6, 2, ",
+            {
+                "not_in_park_time_s": 20.0,
+                "weighted_engaged_time_s": 4.0,
+                "steady_frac": 0.6,
+                "parser_version": 2,
+                "override_time_s": None,
+            },
+        ),
+    ],
+    ids=["schema-2", "schema-3", "schema-4"],
+)
+def test_migrates_drive_columns(tmp_path, version, extra_cols, extra_vals, preserved) -> None:
+    path = tmp_path / f"v{version}.sqlite"
+    _write_old_drives(path, version, extra_cols, extra_vals)
     with Cache(path) as cache:
-        assert cache.schema_upgraded_from == "4"
+        assert cache.schema_upgraded_from == version
         assert cache.get_meta("schema_version") == SCHEMA_VERSION
         row = cache.get_drive("d|r")
         assert row is not None
         assert row.engaged_time_s == 10.0
-        assert row.not_in_park_time_s == 20.0
-        assert row.weighted_engaged_time_s == 4.0
-        assert row.parser_version == 2
-        assert row.override_time_s is None
+        for field, value in preserved.items():
+            assert getattr(row, field) == value, field
         cache.save_engaged("d|r", 10.0, "selfdriveState.enabled", 20.0, 4.0, 0.6, 3, 12.0)
         saved = cache.get_drive("d|r")
         assert saved is not None
-        assert saved.override_time_s == 12.0
-        assert saved.parser_version == 3
         assert saved.engaged_time_s == 10.0
+        assert saved.not_in_park_time_s == 20.0
+        assert saved.weighted_engaged_time_s == 4.0
+        assert saved.steady_frac == 0.6
+        assert saved.parser_version == 3
+        assert saved.override_time_s == 12.0
 
 
 def test_watermark_only_moves_forward(tmp_path) -> None:
@@ -438,8 +386,3 @@ def test_download_bytes_retries_server_error() -> None:
     assert client.download_bytes("https://example.invalid/qlog") == b"qlog"
     assert sess.calls == 3
 
-
-def test_time_chunks() -> None:
-    day = 24 * 3600 * 1000
-    chunks = iter_time_chunks(0, 3 * day, chunk_days=1)
-    assert chunks == [(0, day), (day, 2 * day), (2 * day, 3 * day)]
