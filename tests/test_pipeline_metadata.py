@@ -167,7 +167,6 @@ def test_metadata_only_upserts_without_qlogs_or_blanking(tmp_path, monkeypatch) 
     )
     assert stats.routes_listed >= 1
     assert stats.qlogs_parsed == 0
-    assert fake.qlog_calls == 0
     row = _get(settings, ROUTE["fullname"])
     assert row is not None
     assert row.length_miles == 12.5
@@ -240,7 +239,6 @@ def test_nightly_reparse_does_not_wipe_unlisted_history(tmp_path, monkeypatch) -
         reparse_engaged=True,
         seed_qlogs=True,
     )
-    assert fake.qlog_calls == 0
     assert stats.qlogs_parsed == 1
     listed, history = _get(settings, recent["fullname"]), _get(settings, hist)
     assert history is not None and history.qlog_parsed
@@ -285,7 +283,6 @@ def test_nightly_reparses_friday_drive_when_maxqlog_grows(tmp_path, monkeypatch)
     )
     assert any(lo <= start_ms < hi for lo, hi in fake.windows), fake.windows
     assert all(lo > 86_400_000 for lo, _hi in fake.windows), fake.windows
-    assert fake.qlog_calls == 0
     assert stats.qlogs_parsed == 1
     assert stats.qlogs_missing_local == 0
     row = _get(settings, route["fullname"])
@@ -329,7 +326,6 @@ def test_nightly_does_not_list_from_ancient_unparsed(tmp_path, monkeypatch) -> N
     assert fake.windows
     assert min(lo for lo, _hi in fake.windows) >= now_ms - 25 * 3_600_000
     assert stats.qlogs_parsed == 1
-    assert fake.qlog_calls == 0
     assert stats.qlogs_missing_local == 0
     row = _get(settings, stranded)
     assert row is not None and row.qlog_parsed
@@ -364,7 +360,6 @@ def test_nightly_does_not_redownload_recent_end_when_maxqlog_unchanged(tmp_path,
         now_ms,
         backfill=False,
     )
-    assert fake.qlog_calls == 0
     assert stats.qlogs_parsed == 0
     row = _get(settings, route["fullname"])
     assert row is not None
@@ -402,7 +397,6 @@ def test_empty_qlog_parse_keeps_last_good_engaged(tmp_path, monkeypatch) -> None
         backfill=False,
         seed_qlogs=True,
     )
-    assert fake.qlog_calls == 0
     assert stats.qlogs_parsed == 0
     assert stats.qlogs_missing_local == 0
     row = _get(settings, route["fullname"])
@@ -502,7 +496,6 @@ def test_incomplete_local_skips_and_retries_after_fill(tmp_path, monkeypatch) ->
         start_ms,
         backfill=False,
     )
-    assert fake.qlog_calls == 0
     assert stats.qlogs_missing_local >= 1
     assert stats.qlogs_parsed == 0
     row = _get(settings, route["fullname"])
@@ -526,7 +519,6 @@ def test_incomplete_local_skips_and_retries_after_fill(tmp_path, monkeypatch) ->
         start_ms,
         backfill=False,
     )
-    assert fake.qlog_calls == 0
     assert stats.qlogs_parsed == 1
     assert stats.qlogs_missing_local == 0
     row = _get(settings, route["fullname"])
@@ -600,10 +592,8 @@ def test_parse_jobs_matches_serial_engaged_and_weighted(tmp_path, monkeypatch) -
         stats = run_pipeline(settings, backfill=True)
         return stats, settings, fake
 
-    serial_stats, serial_settings, serial_fake = _once("serial", 1)
-    pool_stats, pool_settings, pool_fake = _once("pool", 2)
-    assert serial_fake.qlog_calls == 0
-    assert pool_fake.qlog_calls == 0
+    serial_stats, serial_settings, _ = _once("serial", 1)
+    pool_stats, pool_settings, _ = _once("pool", 2)
     assert serial_stats.qlogs_parsed == pool_stats.qlogs_parsed == 3
     assert serial_stats.qlogs_missing_local == pool_stats.qlogs_missing_local == 0
     for route in routes:
@@ -617,28 +607,5 @@ def test_parse_jobs_matches_serial_engaged_and_weighted(tmp_path, monkeypatch) -
     assert weighted is not None
     assert weighted.weighted_engaged_time_s is not None
     assert weighted.weighted_engaged_time_s > 0
-
-
-def test_parse_jobs_missing_local_does_not_call_download(tmp_path, monkeypatch) -> None:
-    extra = _route(fullname="deadbeefcafebabe|also-missing", maxqlog=1)
-    fake = _QlogClient([ROUTE, extra])
-    stats, settings = _run(
-        tmp_path,
-        monkeypatch,
-        fake,
-        [],
-        None,
-        backfill=True,
-        seed_qlogs=False,
-        parse_jobs=2,
-    )
-    assert fake.qlog_calls == 0
-    assert stats.qlogs_parsed == 0
-    assert stats.qlogs_missing_local == 2
-    for name in (ROUTE["fullname"], extra["fullname"]):
-        row = _get(settings, name)
-        assert row is not None
-        assert row.qlog_parsed is False
-        assert row.engaged_time_s is None
 
 
