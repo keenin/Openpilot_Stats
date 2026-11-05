@@ -9,6 +9,8 @@ from pathlib import Path
 DEFAULT_CACHE = "~/.cache/op-usage/op-usage.sqlite"
 DEFAULT_QLOG_DIR = "~/.cache/op-usage/qlogs"
 DEFAULT_SITE = "./site"
+# Route ids only. Never coordinates. Stays outside the repo.
+DEFAULT_COMMUTE_ROUTES = "~/.config/op-usage/commute_routes.txt"
 
 
 def _expand(path: str) -> Path:
@@ -66,6 +68,9 @@ class Settings:
     files_min_interval_s: float
     request_timeout_s: float
     parse_jobs: int = 1
+    # None skips the commute split (tests). load_settings always sets a path;
+    # a missing file there still renders one table.
+    commute_routes_path: Path | None = None
 
     @property
     def has_auth(self) -> bool:
@@ -82,6 +87,10 @@ def default_site_dir() -> Path:
 
 def default_qlog_dir() -> Path:
     return _expand(DEFAULT_QLOG_DIR)
+
+
+def default_commute_routes_path() -> Path:
+    return _expand(DEFAULT_COMMUTE_ROUTES)
 
 
 def is_live_cache_path(path: Path) -> bool:
@@ -141,4 +150,12 @@ def load_settings() -> Settings:
         files_min_interval_s=float(os.environ.get("FILES_MIN_INTERVAL_S", "13")),
         request_timeout_s=float(os.environ.get("REQUEST_TIMEOUT_S", "60")),
         parse_jobs=parse_jobs_from_env(),
+        commute_routes_path=_commute_routes_path_from_env(),
     )
+
+
+def _commute_routes_path_from_env() -> Path:
+    raw = (os.environ.get("OP_USAGE_COMMUTE_ROUTES") or "").strip()
+    if raw:
+        return _expand(raw)
+    return default_commute_routes_path()
