@@ -16,6 +16,7 @@ Debian box (cron 03:00 PT)
   ├─ sync-qlogs: GET /v1/route/{name}/files → missing qlogs only (rate limit 5/min)
   ├─ parse engaged time from local ~/.cache/op-usage/qlogs (never Comma in this step)
   ├─ SQLite cache (watermark + per-route engaged / not-in-park time)
+  ├─ optional commute route ids (~/.config/op-usage/commute_routes.txt)  # ids only, never in git
   └─ write site/index.html → wrangler pages deploy
 ```
 
@@ -26,6 +27,7 @@ Debian box (cron 03:00 PT)
 - **`master` only** (`master`, `origin/master`, `refs/heads/master`): walk qualifying drives in start-time order and split when the driving-model weights fingerprint changes. A SHA that reappears after a different fingerprint is a **new interval**. Weights = blob SHAs of driving ONNX/pkl under `selfdrive/modeld/models` (then `openpilot/selfdrive/modeld/models`), via the GitHub contents API from `git_commit` + `git_remote`, cached in sqlite (including confirmed misses). UI / cars / CI commits do not split the group. Unknown fingerprints stay one-row-per-interval. Commit cell = last SHA (tooltip: first … last). Optional `GITHUB_TOKEN` raises the GitHub rate limit.
 - **Sort** by last qualifying drive, newest first (not engage %).
 - **Engage %** = `engaged_time / not_in_park_time` (group and drill-down use the same sums). API `total_drive_time_s` is fallback only. Miles from API `distance`.
+- **Commute / non-commute** (optional). One route id per line in `~/.config/op-usage/commute_routes.txt`, or set `OP_USAGE_COMMUTE_ROUTES` to another path. The path can live in `credentials.env`; the id list is its own file and stays out of git. Ids only — no GPS, no home or work coordinates. Do not list the dongle id by itself (that would mark every drive). A drive is commute when any part of its stored route name matches a line. Comma fullname is `dongle_id|route_id`; parts split on `|`, commas, and whitespace, so a chained name can carry more than one id. Match is case-insensitive. Blank lines and `#` comments are ignored. Each section runs the same include / group / sort rules on just its drives. The line above a table counts the drives that section shows (count, miles, engaged time, override time, engage %). **Combined**, under both tables, is the unsplit groups — the same drives the single table would have shown. No file → one table, as before. Empty file → an empty commute section, then everything else.
 
 
 Click the drive **count** to expand that group (date, miles, engage %). The main view does not list every drive.

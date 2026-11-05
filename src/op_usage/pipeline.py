@@ -15,13 +15,13 @@ from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
-from op_usage.aggregate import aggregate_commits
 from op_usage.cache import SCHEMA_VERSION, Cache, DriveRow
 from op_usage.comma_api import CommaClient, RouteMeta, iter_time_chunks, normalize_routes
+from op_usage.commute import load_commute_route_ids
 from op_usage.config import Settings, is_live_cache_path, is_live_site_dir
 from op_usage.qlog import EngagedResult, extract_engaged_time_from_qlogs, load_event_module
 from op_usage.qlog_store import list_local_segments, load_route_qlogs, missing_segments, split_route_name
-from op_usage.site import render_site, write_site
+from op_usage.site import render_drives, write_site
 from op_usage.weights import make_weights_lookup
 
 log = logging.getLogger(__name__)
@@ -69,15 +69,39 @@ class _ParseOutcome:
 
 
 def generate_from_cache(settings: Settings, cache: Cache) -> Path:
-    commits = aggregate_commits(list(cache.iter_drives()), weights_lookup=make_weights_lookup(cache))
-    html = render_site(
-        commits,
+    drives = list(cache.iter_drives())
+    route_ids = _commute_route_ids(settings)
+    html = render_drives(
+        drives,
         generated_at=datetime.now(timezone.utc),
         display_tz=settings.display_tz,
+        commute_route_ids=route_ids,
+        weights_lookup=make_weights_lookup(cache),
     )
     path = write_site(settings.site_dir, html)
-    log.info("wrote %s (%d commits)", path, len(commits))
+    if route_ids is None:
+        log.info("wrote %s (one table)", path)
+    else:
+        log.info("wrote %s (commute split, %d route ids)", path, len(route_ids))
     return path
+
+
+def _commute_route_ids(settings: Settings) -> set[str] | None:
+    """None when no path is configured or the file is not there.
+
+    An empty file is an empty set, which still splits the page.
+    The log line is the count only — route ids are not secrets, but they
+    also are not useful in the nightly log.
+    """
+    path = settings.commute_routes_path
+    if path is None:
+        return None
+    route_ids = load_commute_route_ids(path)
+    if route_ids is None:
+        log.info("commute route file missing (%s); one table", path)
+    else:
+        log.info("commute route file %s (%d ids)", path, len(route_ids))
+    return route_ids
 
 
 def load_fixture_drives(path: Path) -> list[DriveRow]:

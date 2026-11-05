@@ -2,6 +2,8 @@
 .env
 .env.local
 credentials.env
+# Route-id list for the commute split. Belongs in ~/.config, never in git.
+commute_routes.txt
 **/*.pem
 **/*.key
 

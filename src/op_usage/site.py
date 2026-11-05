@@ -3,11 +3,15 @@
 from __future__ import annotations
 
 import html
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from op_usage.aggregate import CommitRow, DriveView
+from op_usage import MIN_DRIVES_PER_COMMIT, MIN_MILES
+from op_usage.aggregate import CommitRow, DriveView, WeightsLookup, aggregate_commits
+from op_usage.cache import DriveRow
+from op_usage.commute import partition_drives
 from op_usage.weights import github_owner_repo
 
 
@@ -16,14 +20,75 @@ def render_site(
     *,
     generated_at: datetime,
     display_tz: str,
+    commute: list[CommitRow] | None = None,
+    other: list[CommitRow] | None = None,
 ) -> str:
+    """One table, or commute then non-commute when ``commute`` is not None.
+
+    ``commute is None`` keeps the original page: ``commits`` is the only
+    table. When ``commute`` is a list (empty is fine), that list is the
+    first table, ``other`` is the second, and ``commits`` is the unsplit
+    grouping used for the Combined line.
+    """
     tz = ZoneInfo(display_tz)
     generated_local = generated_at.astimezone(tz)
     stamp = generated_local.strftime("%Y-%m-%d %H:%M %Z")
-    rows = "\n".join(_commit_block(c, tz) for c in commits)
-    return _PAGE.format(
-        stamp=html.escape(stamp),
-        rows=rows,
+    if commute is None:
+        body = _main_table(_commit_rows(commits, tz))
+    else:
+        other_rows = [] if other is None else other
+        body = "\n".join(
+            [
+                _main_table(
+                    _commit_rows(commute, tz),
+                    caption=_section_caption("Commute", section_stats(commute)),
+                ),
+                _main_table(
+                    _commit_rows(other_rows, tz),
+                    caption=_section_caption("Non-commute", section_stats(other_rows)),
+                ),
+                (
+                    '    <p class="totals">'
+                    f"{html.escape(_section_caption('Combined', section_stats(commits)))}"
+                    "</p>"
+                ),
+            ]
+        )
+    return _PAGE.format(stamp=html.escape(stamp), body=body)
+
+
+def render_drives(
+    drives: list[DriveRow],
+    *,
+    generated_at: datetime,
+    display_tz: str,
+    commute_route_ids: set[str] | None = None,
+    weights_lookup: WeightsLookup | None = None,
+    min_miles: float = MIN_MILES,
+    min_drives: int = MIN_DRIVES_PER_COMMIT,
+) -> str:
+    """Group drives and render HTML.
+
+    ``commute_route_ids is None`` (file missing) is one table. A set,
+    including an empty one, splits commute vs non-commute and runs the
+    same grouping rules on each subset. Combined is the unsplit groups:
+    every drive the single table would have shown.
+    """
+    grouped = {
+        "min_miles": min_miles,
+        "min_drives": min_drives,
+        "weights_lookup": weights_lookup,
+    }
+    commits = aggregate_commits(drives, **grouped)
+    if commute_route_ids is None:
+        return render_site(commits, generated_at=generated_at, display_tz=display_tz)
+    commute_drives, other_drives = partition_drives(drives, commute_route_ids)
+    return render_site(
+        commits,
+        generated_at=generated_at,
+        display_tz=display_tz,
+        commute=aggregate_commits(commute_drives, **grouped),
+        other=aggregate_commits(other_drives, **grouped),
     )
 
 
@@ -51,6 +116,46 @@ def format_pct(pct: float) -> str:
 
 def format_miles(miles: float) -> str:
     return f"{miles:,.1f}"
+
+
+@dataclass(frozen=True)
+class SectionStats:
+    """Sums over the commit rows a table actually shows.
+
+    Engage % is engaged / not_in_park over those sums, same as a CommitRow.
+    """
+
+    drive_count: int
+    total_miles: float
+    engaged_time_s: float
+    override_time_s: float
+    not_in_park_time_s: float
+
+    @property
+    def engage_pct(self) -> float:
+        if self.not_in_park_time_s <= 0:
+            return 0.0
+        return 100.0 * self.engaged_time_s / self.not_in_park_time_s
+
+
+def section_stats(commits: list[CommitRow]) -> SectionStats:
+    return SectionStats(
+        drive_count=sum(c.drive_count for c in commits),
+        total_miles=sum(c.total_miles for c in commits),
+        engaged_time_s=sum(c.engaged_time_s for c in commits),
+        override_time_s=sum(c.override_time_s for c in commits),
+        not_in_park_time_s=sum(c.not_in_park_time_s for c in commits),
+    )
+
+
+def format_section_stats(stats: SectionStats) -> str:
+    label = "1 drive" if stats.drive_count == 1 else f"{stats.drive_count} drives"
+    return (
+        f"{label} · {format_miles(stats.total_miles)} mi · "
+        f"{format_duration(stats.engaged_time_s)} engaged · "
+        f"{format_duration(stats.override_time_s)} override · "
+        f"{format_pct(stats.engage_pct)}"
+    )
 
 
 def format_date_range(first_ms: int, last_ms: int, tz: ZoneInfo) -> str:
@@ -86,6 +191,43 @@ def _hash_title(commit: CommitRow) -> str:
     if first and last and first.lower() != last.lower():
         return f"{first} … {last}"
     return last
+
+
+def _section_caption(title: str, stats: SectionStats) -> str:
+    return f"{title} · {format_section_stats(stats)}"
+
+
+def _commit_rows(commits: list[CommitRow], tz: ZoneInfo) -> str:
+    return "\n".join(_commit_block(c, tz) for c in commits)
+
+
+def _main_table(rows: str, caption: str | None = None) -> str:
+    # Label sits outside the table. table.main uses overflow:hidden for the
+    # rounded card, which would clip a <caption>.
+    label = ""
+    if caption:
+        label = f'    <p class="section">{html.escape(caption)}</p>\n'
+    return (
+        f"{label}"
+        f'    <table class="main">\n'
+        f"{_THEAD}\n"
+        f"      {rows}\n"
+        f"    </table>"
+    )
+
+
+_THEAD = """      <thead>
+        <tr>
+          <th>Branch</th>
+          <th>Commit</th>
+          <th>Date range</th>
+          <th>Drives</th>
+          <th>Miles</th>
+          <th>Engaged time</th>
+          <th title="Connect gray / selfdriveState.overriding while engaged">Override</th>
+          <th title="engaged time / time not in Park">Engage %</th>
+        </tr>
+      </thead>"""
 
 
 def _commit_block(commit: CommitRow, tz: ZoneInfo) -> str:
@@ -233,9 +375,23 @@ _PAGE = """<!DOCTYPE html>
       font-size: 0.8rem;
       margin: 0.7rem 0.15rem 0;
     }}
+    p.section {{
+      margin: 1.35rem 0.15rem 0.45rem;
+      font-size: 0.95rem;
+      font-weight: 650;
+    }}
+    p.section:first-of-type {{
+      margin-top: 0;
+    }}
+    .totals {{
+      margin: 1rem 0.15rem 0;
+      font-size: 0.95rem;
+      font-weight: 650;
+    }}
     @media (max-width: 720px) {{
       table.main thead {{ display: none; }}
       table.main, table.main tbody, table.main tr, table.main td {{ display: block; width: 100%; }}
+      table.main tr.detail[hidden] {{ display: none; }}
       table.main td {{ border-bottom: none; padding: 0.2rem 0.8rem; }}
       table.main tbody.commit {{ border-bottom: 1px solid var(--line); padding: 0.5rem 0; }}
     }}
@@ -243,21 +399,7 @@ _PAGE = """<!DOCTYPE html>
 </head>
 <body>
   <main>
-    <table class="main">
-      <thead>
-        <tr>
-          <th>Branch</th>
-          <th>Commit</th>
-          <th>Date range</th>
-          <th>Drives</th>
-          <th>Miles</th>
-          <th>Engaged time</th>
-          <th title="Connect gray / selfdriveState.overriding while engaged">Override</th>
-          <th title="engaged time / time not in Park">Engage %</th>
-        </tr>
-      </thead>
-      {rows}
-    </table>
+{body}
     <p class="updated">Updated {stamp}</p>
     <p class="updated">Override is Connect gray (selfdriveState.overriding) while engaged, in seconds.</p>
   </main>
