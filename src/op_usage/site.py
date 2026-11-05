@@ -9,7 +9,13 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from op_usage import MIN_DRIVES_PER_COMMIT, MIN_MILES
-from op_usage.aggregate import CommitRow, DriveView, WeightsLookup, aggregate_commits
+from op_usage.aggregate import (
+    CommitRow,
+    DriveView,
+    WeightsLookup,
+    aggregate_commits,
+    is_master_branch,
+)
 from op_usage.cache import DriveRow
 from op_usage.commute import partition_drives
 from op_usage.weights import github_owner_repo
@@ -23,12 +29,13 @@ def render_site(
     commute: list[CommitRow] | None = None,
     other: list[CommitRow] | None = None,
 ) -> str:
-    """One table, or commute then non-commute when ``commute`` is not None.
+    """One table, or commute beside non-commute when ``commute`` is not None.
 
     ``commute is None`` keeps the original page: ``commits`` is the only
     table. When ``commute`` is a list (empty is fine), that list is the
-    first table, ``other`` is the second, and ``commits`` is the unsplit
-    grouping used for the Combined line.
+    left column, ``other`` is the right, and rows share one group order.
+    A missing group is a blank slot so the other side stays aligned.
+    ``commits`` is the unsplit grouping used for the Combined line.
     """
     tz = ZoneInfo(display_tz)
     generated_local = generated_at.astimezone(tz)
@@ -37,23 +44,7 @@ def render_site(
         body = _main_table(_commit_rows(commits, tz))
     else:
         other_rows = [] if other is None else other
-        body = "\n".join(
-            [
-                _main_table(
-                    _commit_rows(commute, tz),
-                    caption=_section_caption("Commute", section_stats(commute)),
-                ),
-                _main_table(
-                    _commit_rows(other_rows, tz),
-                    caption=_section_caption("Non-commute", section_stats(other_rows)),
-                ),
-                (
-                    '    <p class="totals">'
-                    f"{html.escape(_section_caption('Combined', section_stats(commits)))}"
-                    "</p>"
-                ),
-            ]
-        )
+        body = _split_columns(commute, other_rows, commits, tz)
     return _PAGE.format(stamp=html.escape(stamp), body=body)
 
 
@@ -201,6 +192,91 @@ def _commit_rows(commits: list[CommitRow], tz: ZoneInfo) -> str:
     return "\n".join(_commit_block(c, tz) for c in commits)
 
 
+def group_key(row: CommitRow) -> tuple[str, str, str]:
+    """Identity shared by the two sides of one group.
+
+    Other branches are one row per SHA, so the SHA lines up even when the
+    two sides show different branch labels. A master row is a weights era;
+    the commit span on the row (first SHA, last SHA) is the key.
+    """
+    last = (row.git_commit or "").lower()
+    first = (row.era_first_commit or row.git_commit or "").lower()
+    if is_master_branch(row.git_branch):
+        return ("master", first, last)
+    return ("sha", last, "")
+
+
+def aligned_group_rows(
+    commute: list[CommitRow],
+    other: list[CommitRow],
+) -> list[tuple[CommitRow | None, CommitRow | None]]:
+    """Pairs in one order: newest last-drive on either side first.
+
+    The side that does not have a group is None. The page renders that as
+    a blank slot so the following groups stay on the same row.
+    """
+    left = {group_key(row): row for row in commute}
+    right = {group_key(row): row for row in other}
+
+    def newest(key: tuple[str, str, str]) -> int:
+        times = [side[key].last_drive_ms for side in (left, right) if key in side]
+        return max(times) if times else 0
+
+    keys = sorted(set(left) | set(right), key=lambda key: (-newest(key), key))
+    return [(left.get(key), right.get(key)) for key in keys]
+
+
+def _split_columns(
+    commute: list[CommitRow],
+    other: list[CommitRow],
+    combined: list[CommitRow],
+    tz: ZoneInfo,
+) -> str:
+    parts = [
+        '    <div class="columns">',
+        _section_label("commute", "Commute", commute),
+        _section_label("other", "Non-commute", other),
+        _colhead("commute"),
+        _colhead("other"),
+    ]
+    for left, right in aligned_group_rows(commute, other):
+        parts.append(_slot(left, tz, "commute"))
+        parts.append(_slot(right, tz, "other"))
+    parts.append("    </div>")
+    combined_line = html.escape(_section_caption("Combined", section_stats(combined)))
+    parts.append(f'    <p class="totals">{combined_line}</p>')
+    return "\n".join(parts)
+
+
+def _section_label(side: str, title: str, rows: list[CommitRow]) -> str:
+    caption = html.escape(_section_caption(title, section_stats(rows)))
+    return f'      <p class="section {side}">{caption}</p>'
+
+
+def _colhead(side: str) -> str:
+    return (
+        f'      <div class="colhead {side}">\n'
+        f'        <table class="main">\n'
+        f"{_COLS}\n"
+        f"{_THEAD}\n"
+        f"        </table>\n"
+        f"      </div>"
+    )
+
+
+def _slot(row: CommitRow | None, tz: ZoneInfo, side: str) -> str:
+    if row is None:
+        return f'      <div class="slot {side} empty"></div>'
+    return (
+        f'      <div class="slot {side}">\n'
+        f'        <table class="main">\n'
+        f"{_COLS}\n"
+        f"          {_commit_block(row, tz)}\n"
+        f"        </table>\n"
+        f"      </div>"
+    )
+
+
 def _main_table(rows: str, caption: str | None = None) -> str:
     # Label sits outside the table. table.main uses overflow:hidden for the
     # rounded card, which would clip a <caption>.
@@ -214,6 +290,18 @@ def _main_table(rows: str, caption: str | None = None) -> str:
         f"      {rows}\n"
         f"    </table>"
     )
+
+
+_COLS = """          <colgroup>
+            <col style="width:20%">
+            <col style="width:13%">
+            <col style="width:17%">
+            <col style="width:8%">
+            <col style="width:9%">
+            <col style="width:12%">
+            <col style="width:11%">
+            <col style="width:10%">
+          </colgroup>"""
 
 
 _THEAD = """      <thead>
@@ -314,6 +402,34 @@ _PAGE = """<!DOCTYPE html>
       margin: 0 auto;
       padding: 1.5rem 1rem 2.5rem;
     }}
+    main:has(.columns) {{
+      max-width: 1600px;
+    }}
+    .columns {{
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+      column-gap: 1.5rem;
+      row-gap: 0.55rem;
+      align-items: stretch;
+    }}
+    .columns table.main {{
+      table-layout: fixed;
+      width: 100%;
+    }}
+    .columns table.main th,
+    .columns table.main td {{
+      padding-left: 0.4rem;
+      padding-right: 0.4rem;
+    }}
+    .columns .branch {{
+      word-break: normal;
+      overflow-wrap: break-word;
+    }}
+    .slot.empty {{
+      background: var(--card);
+      border-radius: 10px;
+      min-height: 2.75rem;
+    }}
     table.main {{
       width: 100%;
       border-collapse: collapse;
@@ -376,12 +492,9 @@ _PAGE = """<!DOCTYPE html>
       margin: 0.7rem 0.15rem 0;
     }}
     p.section {{
-      margin: 1.35rem 0.15rem 0.45rem;
+      margin: 0 0.15rem 0.45rem;
       font-size: 0.95rem;
       font-weight: 650;
-    }}
-    p.section:first-of-type {{
-      margin-top: 0;
     }}
     .totals {{
       margin: 1rem 0.15rem 0;
@@ -389,6 +502,15 @@ _PAGE = """<!DOCTYPE html>
       font-weight: 650;
     }}
     @media (max-width: 720px) {{
+      .columns {{
+        display: flex;
+        flex-direction: column;
+      }}
+      .columns .commute {{ order: 0; }}
+      .columns .other {{ order: 1; }}
+      .slot.empty {{ display: none; }}
+      .colhead {{ display: none; }}
+      p.section.other {{ margin-top: 1.35rem; }}
       table.main thead {{ display: none; }}
       table.main, table.main tbody, table.main tr, table.main td {{ display: block; width: 100%; }}
       table.main tr.detail[hidden] {{ display: none; }}
