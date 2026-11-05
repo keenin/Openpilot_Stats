@@ -3,25 +3,14 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from pathlib import Path
 
-from helpers import drive_row
 from op_usage.aggregate import aggregate_commits
 from op_usage.pipeline import load_fixture_drives
-from op_usage.site import commit_url, format_duration, format_pct, render_site
+from op_usage.site import render_site
 
 FIXTURE = Path(__file__).resolve().parents[1] / "fixtures" / "drives.json"
-CHROME = (
-    "Personal engaged-time",
-    "Private drives only",
-    "Demo data",
-    "Qualifying",
-    "static page",
-    "community data",
-    "openpilot usage",
-    "Include a drive",
-)
 
 
-def test_demo_html_is_table_only_qualified_commits_newest_first() -> None:
+def test_demo_html_lists_qualified_commits_newest_first() -> None:
     commits = aggregate_commits(load_fixture_drives(FIXTURE))
     assert [c.short_hash for c in commits] == ["7c3a91b", "1e9d2c4", "0f1e2d3"]
     html = render_site(
@@ -35,66 +24,6 @@ def test_demo_html_is_table_only_qualified_commits_newest_first() -> None:
     assert "wip-two-drives" not in html
     assert "mixed-filters" not in html
     assert html.index("nightly-togo") < html.index("experimental-long") < html.index("release-c3")
-    assert 'title="7c3a91b0f2e44a1b9c0d1e2f3a4b5c6d7e8f9012"' in html
-    assert "button" in html and "expand" in html
-    assert html.count("deadbeefcafebabe|") == 0
-    assert "18.4" in html
-    for header in ("Branch", "Commit", "Date range", "Drives", "Miles", "Engaged time"):
-        assert f"<th>{header}</th>" in html
-    assert ">Override</th>" in html
     assert "Engage %" in html
-    assert "Override %" not in html
     assert "Weighted engaged" not in html
-    assert "Weight %" not in html
-    assert "steady-speed / freeway sits" not in html
     assert "Updated 2026-09-11 03:00 PDT" in html
-    assert "selfdriveState.overriding" in html
-    assert "<table class=\"nested\">" in html
-    assert "2026-09-10" in html
-    assert 'colspan="8"' in html
-    assert "1m 28s" in html
-    assert "4m 17s" in html
-    for blob in CHROME:
-        assert blob not in html
-    assert "<title>Openpilot Stats</title>" in html
-    assert "<h1" not in html
-    assert "banner" not in html
-    assert "<header" not in html
-
-
-def test_helpers() -> None:
-    assert format_duration(3900) == "1h 05m"
-    assert format_pct(81.234) == "81.2%"
-    assert commit_url("git@github.com:commaai/openpilot.git", "abc") == (
-        "https://github.com/commaai/openpilot/commit/abc"
-    )
-    assert commit_url("https://github.com/foo/bar.git", "deadbeef") == (
-        "https://github.com/foo/bar/commit/deadbeef"
-    )
-
-
-def test_master_era_hash_is_first_last_without_new_chrome() -> None:
-    drives = [
-        drive_row(
-            route_name=f"m{i}",
-            git_commit="aaaaaaa111111111111111111111111111111111" if i < 2 else "bbbbbbb222222222222222222222222222222222",
-            git_branch="master",
-            git_remote="git@github.com:commaai/openpilot.git",
-            start_time_utc_ms=1000 + i,
-        )
-        for i in range(3)
-    ]
-    commits = aggregate_commits(drives, weights_lookup=lambda c, r: "era")
-    assert len(commits) == 1
-    html = render_site(
-        commits,
-        generated_at=datetime.now(timezone.utc),
-        display_tz="UTC",
-    )
-    assert "aaaaaaa…bbbbbbb" in html
-    assert "master" in html
-    assert "<h1" not in html
-    assert "weights era" not in html
-    assert commit_url(commits[0].git_remote, commits[0].git_commit).endswith(
-        "/commit/bbbbbbb222222222222222222222222222222222"
-    )

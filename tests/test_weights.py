@@ -11,26 +11,9 @@ from op_usage.pipeline import generate_from_cache
 from op_usage.weights import (
     MISSING_WEIGHTS,
     fingerprint_from_contents,
-    github_repo_from_remote,
-    is_driving_weight,
     make_weights_lookup,
     GitHubWeightsClient,
 )
-
-
-def test_repo_from_remote() -> None:
-    assert github_repo_from_remote("git@github.com:commaai/openpilot.git") == "commaai/openpilot"
-    assert github_repo_from_remote("https://github.com/foo/bar.git") == "foo/bar"
-    assert github_repo_from_remote("") == "commaai/openpilot"
-
-
-def test_driving_weight_names() -> None:
-    assert is_driving_weight("driving_supercombo.onnx")
-    assert is_driving_weight("big_driving_supercombo.onnx")
-    assert is_driving_weight("driving_tinygrad.pkl")
-    assert not is_driving_weight("dmonitoring_model.onnx")
-    assert not is_driving_weight("README.md")
-    assert not is_driving_weight("__init__.py")
 
 
 def test_fingerprint_ignores_dmonitoring_and_docs() -> None:

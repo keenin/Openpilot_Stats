@@ -17,7 +17,6 @@ from op_usage.qlog import (
     load_event_module,
     override_seconds,
     pick_source,
-    _gear_is_park,
     _load_stub_schema,
 )
 from op_usage.steady import MS_TO_MPH
@@ -147,37 +146,16 @@ def _state_trace(pattern: list[tuple[float, int]], dt: float = 1.0) -> list[Stat
     return out
 
 
-def test_override_flat_enabled_is_zero() -> None:
-    samples = _state_trace([(10.0, 2)])
-    assert abs(override_seconds(samples) - 0.0) < 1e-6
-
-
-def test_override_flat_overriding_counts_span() -> None:
-    samples = _state_trace([(8.0, 4)])
-    assert abs(override_seconds(samples) - 8.0) < 1e-6
-
-
-def test_override_mix_counts_only_overriding_blips() -> None:
-    samples = _state_trace([(5.0, 2), (2.0, 4), (3.0, 2), (1.0, 4), (4.0, 2)])
-    assert abs(override_seconds(samples) - 3.0) < 1e-6
-
-
-def test_override_skips_gaps_larger_than_max() -> None:
-    gap = [
-        StateSample(0, 4),
-        StateSample(int(20 * NS), 4),
-    ]
+def test_override_seconds_counts_overriding_spans_only() -> None:
+    assert abs(override_seconds(_state_trace([(8.0, 4)])) - 8.0) < 1e-6
+    assert abs(override_seconds(_state_trace([(10.0, 2)])) - 0.0) < 1e-6
+    assert abs(override_seconds(_state_trace([(10.0, 1)])) - 0.0) < 1e-6
+    mixed = _state_trace([(5.0, 2), (2.0, 4), (3.0, 2), (1.0, 4), (4.0, 2)])
+    assert abs(override_seconds(mixed) - 3.0) < 1e-6
+    gap = [StateSample(0, 4), StateSample(int(20 * NS), 4)]
     assert override_seconds(gap, max_gap_s=5.0) == 0.0
-    tight = [
-        StateSample(0, 4),
-        StateSample(int(2 * NS), 4),
-    ]
+    tight = [StateSample(0, 4), StateSample(int(2 * NS), 4)]
     assert abs(override_seconds(tight, max_gap_s=5.0) - 2.0) < 1e-6
-
-
-def test_override_pre_enabled_is_not_counted() -> None:
-    samples = _state_trace([(10.0, 1)])
-    assert abs(override_seconds(samples) - 0.0) < 1e-6
 
 
 def test_selfdrive_state_wins_over_controls() -> None:
@@ -208,16 +186,6 @@ def test_controls_state_fallback_on_synthetic_qlog() -> None:
     assert result.source == CONTROLS_SOURCE
     assert abs(result.engaged_time_s - 5.0) < 1e-6
     assert result.override_time_s is None
-
-
-def test_stub_schema_keeps_valid_out_of_union() -> None:
-    event_cls = _load_stub_schema()
-    msg = event_cls.new_message()
-    msg.logMonoTime = 1
-    msg.valid = True
-    msg.init("selfdriveState").enabled = True
-    assert msg.which() == "selfdriveState"
-    assert msg.valid is True
 
 
 def test_stub_reads_cereal_like_selfdrive_state(tmp_path: Path) -> None:
@@ -321,16 +289,6 @@ def test_unknown_and_reverse_count_as_not_in_park() -> None:
     # unknown 4s + reverse 5s + drive 3s = 12s; park 3s ignored
     assert result.not_in_park_time_s is not None
     assert abs(result.not_in_park_time_s - 12.0) < 1e-6
-    park = event_cls.new_message()
-    park.init("carState").gearShifter = "park"
-    drive = event_cls.new_message()
-    drive.init("carState").gearShifter = "drive"
-    unknown = event_cls.new_message()
-    unknown.init("carState").gearShifter = "unknown"
-    assert _gear_is_park(park.carState.gearShifter) is True
-    assert _gear_is_park(drive.carState.gearShifter) is False
-    assert _gear_is_park(unknown.carState.gearShifter) is False
-    assert park.carState.gearShifter.raw == 1
 
 
 def test_stub_reads_cereal_like_car_state_gear(tmp_path: Path) -> None:

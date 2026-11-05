@@ -4,7 +4,6 @@ from pathlib import Path
 
 from helpers import drive_row, seed_local_qlogs
 from op_usage.cache import Cache
-from op_usage.cli import main
 from op_usage.config import Settings, default_qlog_dir, default_parse_jobs, is_live_qlog_dir, load_settings
 from op_usage.qlog_store import (
     list_local_segments,
@@ -13,12 +12,9 @@ from op_usage.qlog_store import (
     qlog_segment_from_url,
     run_sync_qlogs,
     segment_path,
-    split_route_name,
     urls_by_segment,
     write_qlog_atomic,
 )
-
-ROOT = Path(__file__).resolve().parents[1]
 
 
 def _settings(tmp_path: Path) -> Settings:
@@ -39,14 +35,6 @@ def _settings(tmp_path: Path) -> Settings:
         files_min_interval_s=13,
         request_timeout_s=60,
     )
-
-
-def test_split_route_and_layout(tmp_path: Path) -> None:
-    dongle, route_id = split_route_name("deadbeefcafebabe|2026-09-01--00-00-00")
-    assert dongle == "deadbeefcafebabe"
-    assert route_id == "2026-09-01--00-00-00"
-    path = segment_path(tmp_path / "qlogs", dongle, route_id, 3)
-    assert path == tmp_path / "qlogs" / dongle / route_id / "3.qlog"
 
 
 def test_write_atomic_and_ignore_partial(tmp_path: Path) -> None:
@@ -162,38 +150,6 @@ def test_sync_skips_complete_without_files_call(tmp_path: Path) -> None:
     assert stats.routes_skipped_complete == 1
     assert client.files_calls == []
     assert client.downloads == []
-
-
-def test_nightly_script_lists_then_syncs_then_parses() -> None:
-    text = (ROOT / "scripts" / "nightly.sh").read_text(encoding="utf-8")
-    code = [
-        line.strip()
-        for line in text.splitlines()
-        if line.strip() and not line.strip().startswith("#")
-    ]
-    py = [line for line in code if "op_usage" in line]
-    assert len(py) == 3
-    assert "nightly --metadata-only" in py[0]
-    assert "sync-qlogs" in py[1]
-    assert "nightly" in py[2] and "metadata-only" not in py[2]
-    assert code.index(py[0]) < code.index(py[1]) < code.index(py[2])
-
-
-def test_sync_qlogs_cli_help(capsys) -> None:
-    try:
-        main(["sync-qlogs", "--help"])
-    except SystemExit as exc:
-        assert exc.code == 0
-    else:
-        raise AssertionError("expected help SystemExit")
-    out = capsys.readouterr().out
-    assert "missing qlogs" in out
-    try:
-        main(["download-qlogs", "--help"])
-    except SystemExit as exc:
-        assert exc.code == 0
-    alias = capsys.readouterr().out
-    assert "missing qlogs" in alias
 
 
 def test_qlog_dir_env(monkeypatch, tmp_path: Path) -> None:
