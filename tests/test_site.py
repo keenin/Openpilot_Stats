@@ -27,3 +27,13 @@ def test_demo_html_lists_qualified_commits_newest_first() -> None:
     assert "Engage %" in html
     assert "Weighted engaged" not in html
     assert "Updated 2026-09-11 03:00 PDT" in html
+    assert 'content="width=device-width, initial-scale=1"' in html
+    assert "user-scalable" not in html
+    assert "maximum-scale" not in html
+    assert 'name="color-scheme" content="dark"' in html
+    assert "color-scheme: dark" in html
+    assert 'name="text-scale" content="scale"' in html
+    assert 'scope="col">Branch' in html
+    assert "@media (max-width: 45em)" in html
+    assert 'aria-label="5 nightly-togo 7c3a91b drives"' in html
+    assert "<h1" not in html

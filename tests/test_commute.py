@@ -205,8 +205,8 @@ def test_commute_file_splits_and_combined_equals_full_set(tmp_path: Path) -> Non
     assert html.index('<p class="section commute">') < html.index('<p class="section other">')
     assert html.index('<p class="totals">Combined') < html.index("Updated ")
     wide = "grid-template-columns: minmax(0, 1fr) minmax(0, 1fr)"
-    media = html.split("@media (max-width: 720px)", 1)[1]
-    assert html.index(wide) < html.index("@media (max-width: 720px)")
+    media = html.split("@media (max-width: 45em)", 1)[1]
+    assert html.index(wide) < html.index("@media (max-width: 45em)")
     assert "flex-direction: column" in media
     assert ".slot.empty { display: none; }" in media
     assert html.index("Combined ·") < html.index("Updated ")
