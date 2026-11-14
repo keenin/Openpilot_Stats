@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from op_usage import MIN_DRIVES_PER_COMMIT, MIN_MILES
+from op_usage import MIN_DRIVES_PER_COMMIT, MIN_MILES, SITE_VERSION
 from op_usage.aggregate import (
     CommitRow,
     DriveView,
@@ -45,7 +45,11 @@ def render_site(
     else:
         other_rows = [] if other is None else other
         body = _split_columns(commute, other_rows, commits, tz)
-    return _PAGE.format(stamp=html.escape(stamp), body=body)
+    return _PAGE.format(
+        stamp=html.escape(stamp),
+        body=body,
+        version=html.escape(SITE_VERSION),
+    )
 
 
 def render_drives(
@@ -271,7 +275,7 @@ def _slot(row: CommitRow | None, tz: ZoneInfo, side: str) -> str:
         f'      <div class="slot {side}">\n'
         f'        <table class="main">\n'
         f"{_COLS}\n"
-        f"          {_commit_block(row, tz)}\n"
+        f"          {_commit_block(row, tz, group=side)}\n"
         f"        </table>\n"
         f"      </div>"
     )
@@ -306,19 +310,19 @@ _COLS = """          <colgroup>
 
 _THEAD = """      <thead>
         <tr>
-          <th>Branch</th>
-          <th>Commit</th>
-          <th>Date range</th>
-          <th>Drives</th>
-          <th>Miles</th>
-          <th>Engaged time</th>
-          <th title="Connect gray / selfdriveState.overriding while engaged">Override</th>
-          <th title="engaged time / time not in Park">Engage %</th>
+          <th scope="col">Branch</th>
+          <th scope="col">Commit</th>
+          <th scope="col">Date range</th>
+          <th scope="col">Drives</th>
+          <th scope="col">Miles</th>
+          <th scope="col">Engaged time</th>
+          <th scope="col" title="Connect gray / selfdriveState.overriding while engaged">Override</th>
+          <th scope="col" title="engaged time / time not in Park">Engage %</th>
         </tr>
       </thead>"""
 
 
-def _commit_block(commit: CommitRow, tz: ZoneInfo) -> str:
+def _commit_block(commit: CommitRow, tz: ZoneInfo, *, group: str = "") -> str:
     url = commit_url(commit.git_remote, commit.git_commit)
     short = html.escape(commit.short_hash)
     full = html.escape(_hash_title(commit))
@@ -331,6 +335,24 @@ def _commit_block(commit: CommitRow, tz: ZoneInfo) -> str:
         hash_html = f'<span class="hash" title="{full}">{short}</span>'
     cid = html.escape(commit.git_commit)
     nested = "\n".join(_drive_row(d, tz) for d in reversed(commit.drives))
+    side = {"commute": "Commute", "other": "Non-commute"}.get(group, "")
+    noun = "drive" if commit.drive_count == 1 else "drives"
+    label = html.escape(
+        " ".join(
+            part
+            for part in (
+                str(commit.drive_count),
+                side,
+                commit.git_branch,
+                commit.short_hash,
+                noun,
+            )
+            if part
+        )
+    )
+    detail_id = html.escape(
+        f"drives-{group or 'all'}-{commit.git_commit}-{commit.first_drive_ms}"
+    )
     return f"""
     <tbody class="commit" data-commit="{cid}">
       <tr>
@@ -338,7 +360,7 @@ def _commit_block(commit: CommitRow, tz: ZoneInfo) -> str:
         <td class="mono">{hash_html}</td>
         <td>{html.escape(format_date_range(commit.first_drive_ms, commit.last_drive_ms, tz))}</td>
         <td>
-          <button type="button" class="expand" aria-expanded="false" data-target="{cid}">
+          <button type="button" class="expand" aria-expanded="false" aria-controls="{detail_id}" aria-label="{label}" data-target="{cid}">
             {commit.drive_count}
           </button>
         </td>
@@ -347,11 +369,11 @@ def _commit_block(commit: CommitRow, tz: ZoneInfo) -> str:
         <td class="num">{format_duration(commit.override_time_s)}</td>
         <td class="num pct">{format_pct(commit.engage_pct)}</td>
       </tr>
-      <tr class="detail" hidden>
+      <tr class="detail" id="{detail_id}" hidden>
         <td colspan="8">
           <table class="nested">
             <thead>
-              <tr><th>Drive</th><th>Miles</th><th title="engaged time / time not in Park">Engage %</th></tr>
+              <tr><th scope="col">Drive</th><th scope="col">Miles</th><th scope="col" title="engaged time / time not in Park">Engage %</th></tr>
             </thead>
             <tbody>
               {nested}
@@ -378,9 +400,12 @@ _PAGE = """<!DOCTYPE html>
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <meta name="text-scale" content="scale">
   <title>Openpilot Stats</title>
   <style>
     :root {{
+      color-scheme: dark;
       --bg: #0f1218;
       --card: #171b24;
       --ink: #e7ebf0;
@@ -418,8 +443,7 @@ _PAGE = """<!DOCTYPE html>
     }}
     .columns table.main th,
     .columns table.main td {{
-      padding-left: 0.4rem;
-      padding-right: 0.4rem;
+      padding-inline: 0.4rem;
     }}
     .columns .branch {{
       word-break: normal;
@@ -438,17 +462,19 @@ _PAGE = """<!DOCTYPE html>
       overflow: hidden;
     }}
     table.main thead th {{
-      text-align: left;
+      text-align: start;
       font-size: 0.75rem;
       letter-spacing: 0.04em;
       text-transform: uppercase;
       color: var(--muted);
       font-weight: 600;
-      padding: 0.65rem 0.8rem;
+      padding-block: 0.65rem;
+      padding-inline: 0.8rem;
       border-bottom: 1px solid var(--line);
     }}
     table.main td {{
-      padding: 0.6rem 0.8rem;
+      padding-block: 0.6rem;
+      padding-inline: 0.8rem;
       border-bottom: 1px solid var(--line);
       vertical-align: top;
     }}
@@ -458,7 +484,10 @@ _PAGE = """<!DOCTYPE html>
       font-size: 0.92rem;
     }}
     a.hash {{ color: var(--accent); text-decoration: none; }}
-    a.hash:hover {{ text-decoration: underline; }}
+    a.hash:focus-visible {{ text-decoration: underline; }}
+    @media (hover: hover) {{
+      a.hash:hover {{ text-decoration: underline; }}
+    }}
     .num {{ font-variant-numeric: tabular-nums; }}
     .pct {{ color: var(--accent); font-weight: 650; }}
     button.expand {{
@@ -471,9 +500,21 @@ _PAGE = """<!DOCTYPE html>
       font: inherit;
       font-variant-numeric: tabular-nums;
     }}
-    button.expand:hover, button.expand[aria-expanded="true"] {{
+    button.expand:focus-visible,
+    button.expand[aria-expanded="true"] {{
       border-color: var(--accent);
       color: var(--accent);
+    }}
+    @media (hover: hover) {{
+      button.expand:hover {{
+        border-color: var(--accent);
+        color: var(--accent);
+      }}
+    }}
+    @media (forced-colors: active) {{
+      button.expand[aria-expanded="true"] {{
+        outline: 2px solid Highlight;
+      }}
     }}
     table.nested {{
       width: 100%;
@@ -482,7 +523,8 @@ _PAGE = """<!DOCTYPE html>
       border-radius: 8px;
     }}
     table.nested th, table.nested td {{
-      padding: 0.35rem 0.55rem;
+      padding-block: 0.35rem;
+      padding-inline: 0.55rem;
       font-size: 0.88rem;
       border-bottom: 1px solid var(--line);
     }}
@@ -501,7 +543,7 @@ _PAGE = """<!DOCTYPE html>
       font-size: 0.95rem;
       font-weight: 650;
     }}
-    @media (max-width: 720px) {{
+    @media (max-width: 45em) {{
       .columns {{
         display: flex;
         flex-direction: column;
@@ -524,6 +566,7 @@ _PAGE = """<!DOCTYPE html>
 {body}
     <p class="updated">Updated {stamp}</p>
     <p class="updated">Override is Connect gray (selfdriveState.overriding) while engaged, in seconds.</p>
+    <p class="updated">Version {version}</p>
   </main>
   <script>
     document.querySelectorAll("button.expand").forEach(function (btn) {{
