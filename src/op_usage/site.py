@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from op_usage import MIN_DRIVES_PER_COMMIT, MIN_MILES
+from op_usage import MIN_DRIVES_PER_COMMIT, MIN_MILES, SITE_VERSION
 from op_usage.aggregate import (
     CommitRow,
     DriveView,
@@ -45,7 +45,11 @@ def render_site(
     else:
         other_rows = [] if other is None else other
         body = _split_columns(commute, other_rows, commits, tz)
-    return _PAGE.format(stamp=html.escape(stamp), body=body)
+    return _PAGE.format(
+        stamp=html.escape(stamp),
+        body=body,
+        version=html.escape(SITE_VERSION),
+    )
 
 
 def render_drives(
@@ -562,6 +566,7 @@ _PAGE = """<!DOCTYPE html>
 {body}
     <p class="updated">Updated {stamp}</p>
     <p class="updated">Override is Connect gray (selfdriveState.overriding) while engaged, in seconds.</p>
+    <p class="updated">Version {version}</p>
   </main>
   <script>
     document.querySelectorAll("button.expand").forEach(function (btn) {{

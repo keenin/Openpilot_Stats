@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from pathlib import Path
 
+from op_usage import SITE_VERSION
 from op_usage.aggregate import aggregate_commits
 from op_usage.pipeline import load_fixture_drives
 from op_usage.site import render_site
@@ -37,3 +38,19 @@ def test_demo_html_lists_qualified_commits_newest_first() -> None:
     assert "@media (max-width: 45em)" in html
     assert 'aria-label="5 nightly-togo 7c3a91b drives"' in html
     assert "<h1" not in html
+
+
+def test_generated_html_shows_version() -> None:
+    commits = aggregate_commits(load_fixture_drives(FIXTURE))
+    html = render_site(
+        commits,
+        generated_at=datetime(2026, 9, 11, 10, 0, tzinfo=timezone.utc),
+        display_tz="America/Los_Angeles",
+    )
+    parts = SITE_VERSION.split(".")
+    assert len(parts) == 3
+    assert all(part.isdigit() for part in parts)
+    marker = f'<p class="updated">Version {SITE_VERSION}</p>'
+    assert marker in html
+    assert html.index("Updated 2026-09-11 03:00 PDT") < html.index(marker)
+    assert html.index(marker) < html.index("<script>")
